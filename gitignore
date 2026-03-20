@@ -1,0 +1,51 @@
+# === Model checkpoints & large files ===
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.gguf
+checkpoints/
+models/
+
+# === Experiment outputs ===
+results/raw_data/
+results/checkpoints/
+
+# === Weights & Biases ===
+wandb/
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# === Jupyter ===
+.ipynb_checkpoints/
+
+# === Environment & secrets ===
+.env
+.env.local
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Data files (generated on the fly by CityLearn) ===
+*.csv
+*.h5
+*.hdf5
+# Exception: keep small config/example CSVs
+!configs/*.csv
+!data/examples/*.csv
