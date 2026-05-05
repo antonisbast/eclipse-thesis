@@ -14,6 +14,47 @@
 
 ## Log
 
+### 2026-05-05 — 03_slm_colab merge: V2 Colab fixes + prompt/timing fixes [LOCAL]
+- Merged 03_slm_colabV2.ipynb (user's working Colab version) into 03_slm_colab.ipynb
+- V2 changes preserved (necessary to run on Colab):
+  - CityLearn install split into two steps: deps first (numpy/gymnasium/doe-xstock/
+    nrel-pysam), then `citylearn --no-deps` to avoid pip resolver conflicts
+  - `LocalHFProvider.complete()`: Gemma system-role workaround (Gemma rejects "system"
+    role — system prompt merged into user message); `return_dict=True` in
+    `apply_chat_template`; handles both Tensor and BatchEncoding return types
+  - `_is_gemma` flag added to `__init__`
+  - Real GitHub URL: `https://github.com/antonisbast/eclipse-thesis`
+  - Model: `meta-llama/Meta-Llama-3-8B-Instruct` with `LOAD_IN_4BIT=True`
+  - Utility cells: rm-rf (fresh clone), debug paths (verify clone), Drive mount
+  - `MOUNT_DRIVE=True` (user always mounts Drive)
+- Our fixes also applied:
+  - `make_slm_system_prompt` imported and used in run-slm cell
+  - `MAX_NEW_TOKENS=150` with runtime tradeoff comment (was 400)
+  - Warmup cell uses realistic state prompt for accurate timing estimate
+  - § 6b prompt comparison table + code cell
+  - `|` syntax typo fixed in timing-analysis cell
+  - VRAM table updated to include Llama-3-8B row
+- 03_slm_colabV2.ipynb kept as reference; 03_slm_colab.ipynb is the canonical version
+
+### 2026-05-05 — SLM prompt + timing fixes [LOCAL]
+- `src/agent.py`: added `make_slm_system_prompt(n_buildings)` — compact prompt for ≤4B models:
+  - No "think step by step" REASONING PROTOCOL (was the main cause of 35-min runtime)
+  - 7 numbered priority rules (first-match-wins) instead of prose strategy section
+  - Output instruction: "these N lines only, nothing else" (stronger than "strict")
+  - ~40% fewer prompt tokens → faster prefill on every call
+  - Designed for MAX_NEW_TOKENS ≤ 150; generates ~40-80 tokens vs 100-300 with full prompt
+- `notebooks/03_slm_colab.ipynb` updated:
+  - `config`: MAX_NEW_TOKENS 400 → 150 (with explanation of runtime tradeoff)
+  - `imports`: added `make_slm_system_prompt` import
+  - `warmup`: fixed timing estimate — now uses realistic state + SLM system prompt instead
+    of trivial "Say READY" (which generated 1 token and gave 10× optimistic estimate)
+  - New § 6b: comparison table (full vs SLM prompt) + code cell showing both
+  - `run-slm`: now passes `system=make_slm_system_prompt(3)` to both agents
+  - Expected improvement: 35 min → ~10 min for 168-step dual-agent rollout on T4
+- Confirmed KPI evaluation is correct for dual-agent: both agents' actions combine into
+  a single env.step() call on the shared 6-building env; env.evaluate() sees the full
+  trajectory independent of the agent split.
+
 ### 2026-05-05 — 03_slm_colab.ipynb: local SLM inference on Colab GPU [LOCAL]
 - Created `notebooks/03_slm_colab.ipynb` — fully self-contained Colab notebook
 - **LocalHFProvider** class defined inline: same `.complete()` / `.step()` interface as

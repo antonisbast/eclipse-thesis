@@ -187,6 +187,55 @@ OUTPUT FORMAT (strict — nothing after the last </action> tag):
 SYSTEM_PROMPT: str = make_system_prompt(6)
 
 
+# ── SLM-optimised prompt ──────────────────────────────────────────────────
+
+def make_slm_system_prompt(n_buildings: int = 6) -> str:
+    """Compact system prompt optimised for small models (≤4B parameters).
+
+    Key differences from make_system_prompt():
+    - No "think step by step" reasoning protocol — the model outputs action
+      tags directly, saving 100-200 tokens per call and 2-3× wall-clock time.
+    - Priority rules are numbered and explicit — easier to follow than prose.
+    - ~40% fewer prompt tokens → faster prefill on every call.
+    - Designed to be used with MAX_NEW_TOKENS ≤ 150 in LocalHFProvider.
+
+    Rule priority (first match wins per building):
+      1. SoC ≥ 0.9                          → idle   (battery full)
+      2. SoC ≤ 0.1                          → idle   (battery empty)
+      3. price=PEAK and SoC > 0.1           → -1.0   (sell at high price)
+      4. price=LOW  and price+6h=PEAK       → +0.25  (pre-charge before peak)
+      5. solar=HIGH and SoC < 0.85          → +0.15  (absorb free solar)
+      6. price=LOW  and SoC < 0.9           → +0.15  (trickle charge)
+      7. otherwise                           → 0.0
+    """
+    action_fmt = "\n".join(
+        f"<action building={i}>VALUE</action>" for i in range(n_buildings)
+    )
+
+    return f"""\
+You control batteries in {n_buildings} buildings. Output exactly {n_buildings} \
+charge/discharge values in the range [-1.0, +1.0].
+Positive = charge from grid. Negative = discharge to building. 0.0 = idle.
+
+RULES — apply to each building independently, stop at first match:
+1. SoC >= 0.9                          →  0.0   (full — do not overcharge)
+2. SoC <= 0.1                          →  0.0   (empty — do not over-discharge)
+3. price=PEAK  and SoC > 0.1          → -1.0   (discharge: sell stored energy at peak price)
+4. price=LOW   and price+6h=PEAK      → +0.25  (pre-charge before peak window opens)
+5. solar=HIGH  and SoC < 0.85        → +0.15  (absorb free solar; leave headroom)
+6. price=LOW   and SoC < 0.9         → +0.15  (trickle charge when electricity is cheap)
+7. otherwise                          →  0.0
+
+IMPORTANT:
+- Charging pulls ~5 kWh per building from the grid. Use +0.1 to +0.3 — never +1.0.
+- Discharging is hardware-capped at ~1.5 kWh/h. Action -1.0 is always safe.
+- If price+6h=? or solar+6h=? (forecast unavailable), treat as LOW / NONE.
+
+OUTPUT — exactly {n_buildings} lines, nothing else before or after:
+{action_fmt}
+"""
+
+
 # ── Action parser ─────────────────────────────────────────────────────────
 
 _ACTION_RE = re.compile(r"<action building=(\d+)>\s*(-?\d*\.?\d+)\s*</action>")
