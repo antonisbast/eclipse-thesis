@@ -32,6 +32,12 @@ venv/
 .env
 .env.local
 
+# Environments
+.venv/
+.venv312/
+venv/
+env/
+
 # === OS ===
 .DS_Store
 Thumbs.db
