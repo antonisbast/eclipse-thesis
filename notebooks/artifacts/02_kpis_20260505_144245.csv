@@ -1,0 +1,10 @@
+cost_function,No Control,Random,RBC,"anthropic:claude-haiku-4-5
+(dual-agent)","deepseek:deepseek-chat
+(dual-agent)","nvidia:meta/llama-3.1-8b-instruct
+(dual-agent)"
+electricity_consumption_total,1.0,1.5959,1.2516,1.0108,1.2984,1.2196
+cost_total,1.0,1.541,1.0931,0.9982,1.1386,1.1241
+carbon_emissions_total,1.0,1.597,1.2319,1.0106,1.2744,1.2107
+daily_peak_average,1.0,1.5396,1.5025,1.035,1.2348,1.1603
+ramping_average,1.0,3.9603,2.2313,1.0435,2.8316,2.349
+daily_one_minus_load_factor_average,0.9913,1.2305,1.3112,0.9869,1.1535,1.1052

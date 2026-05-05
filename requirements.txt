@@ -1,0 +1,24 @@
+# Core environment
+citylearn==2.3.1
+gymnasium==0.29.1
+
+# RL baselines
+stable-baselines3==2.4.1
+
+# Deep learning
+torch==2.5.1
+numpy==1.26.4
+
+# Experiment tracking
+wandb==0.19.1
+
+# Data & visualization
+pandas==2.2.3
+matplotlib==3.9.3
+
+# Config & notebooks
+pyyaml==6.0.2
+jupyter==1.1.1
+
+# Environment variables
+python-dotenv

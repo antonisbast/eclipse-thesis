@@ -1,21 +1,38 @@
-# ECLIPSE Thesis — Multi-Agent Energy Management
+# ECLIPSE Thesis — SLM-Based Energy Management
 
 ## What this project is
 
 MSc thesis at University of West Attica (AIDL program), implementing a subset of the ECLIPSE project.
-Two SLM-based agents manage energy storage across buildings in CityLearn v2 under partial observability.
-Agents perform online RL (not frozen after fine-tuning) and coordinate through three paradigms:
-Action-Only (primary), Experience Sharing (ceiling), and PPO/SAC baseline (reference).
+
+The core objective is to investigate whether Small Language Model (SLM)-based agents can effectively
+manage building energy in CityLearn, and how distributed SLM agents can cooperate under partial
+observability without a central orchestrator.
+
+**Primary research questions:**
+1. How does the SLM agent compare to rule-based and RL baselines (SAC) on energy KPIs?
+2. How well does the SLM agent generalize to unseen buildings and weather conditions?
+3. Can the SLM provide interpretable natural-language rationales for its control actions?
+
+**Secondary research question:** Can SLM-based agents develop implicit coordination through
+behavioral observation alone, without explicit communication?
 
 Supervisor: Dr. Panagiotis Kasnesis
 Student: Antonios Bastoulis
 
 ## Current phase
 
-> **UPDATE THIS** after each work session. Example:
-> Phase 1, Month 1 — Setting up CityLearn environment, configuring obs/action spaces.
+> **UPDATE THIS** after each work session.
 
-Phase: NOT STARTED
+Phase 1, Month 2 — LLM-as-policy baseline functional; folder cleaned; moving toward SAC expert training.
+
+## Four-phase plan
+
+| Phase | Goal | Compute |
+|-------|------|---------|
+| 1 — Expert Baselines | Train SAC; benchmark RBC vs no-op vs LLM-as-policy | Colab GPU |
+| 2 — SLM Integration | Translate observations to text; parse SLM actions | MacBook + Colab |
+| 3 — SLM Fine-Tuning | LoRA / GRPO fine-tuning on CityLearn rollouts | Colab / DGX Spark |
+| 4 — Multi-Agent Deployment | Two SLM agents, partial observability, coordination | DGX Spark ×2 |
 
 ## Project structure
 
@@ -26,36 +43,34 @@ eclipse-thesis/
 ├── .gitignore
 ├── requirements.txt
 ├── docs/
-│   ├── CONTEXT.md         ← full project background, read this first
-│   └── PROGRESS.md        ← living changelog, CHECK BEFORE EVERY SESSION
+│   ├── CONTEXT.md         ← full thesis background, read this first
+│   ├── PROGRESS.md        ← living changelog, CHECK BEFORE EVERY SESSION
+│   ├── CITYLEARN_API.md   ← CityLearn v2 API reference (imports, wrappers, boilerplate)
+│   └── CITYLEARN_INSIGHTS.md  ← observation quirks, battery dynamics, prompting tips
+├── sandbox/               ← one-off exploration scripts (not imported anywhere)
+│   ├── 01–05_*.py         ← env exploration, baselines, obs-to-text experiments
+│   └── _env_helpers.py
 ├── notebooks/             ← narrative + small-scale demos, run LOCALLY on CPU
 │   ├── 01_env_setup.ipynb
-│   ├── 02_rl_baselines.ipynb
-│   ├── 03_rationales.ipynb
-│   ├── 04_finetuning.ipynb
-│   ├── 05_online_rl.ipynb
-│   └── 06_analysis.ipynb
-├── scripts/               ← full-scale training, run on COLAB or DGX SPARK
-│   ├── train_baseline.py  ← PPO/SAC training (Phase 1, Colab GPU)
-│   ├── finetune_slm.py    ← LoRA fine-tuning (Phase 1, Colab GPU)
-│   └── run_experiment.py  ← multi-agent experiments (Phase 2, Colab/DGX)
-├── src/
+│   ├── 04_llm_policy_clean.ipynb  ← LLM-as-policy baseline (current living artifact)
+│   └── (02–06 to be filled as phases progress)
+├── scripts/               ← full-scale training, run on COLAB or DGX SPARK (empty stubs)
+├── src/                   ← reusable modules (empty stubs, filled per phase)
 │   ├── env.py             ← CityLearn wrappers, observation encoding
 │   ├── agent.py           ← SLM agent class, prompt construction, action parsing
-│   ├── rl.py              ← GRPO/PPO online RL logic, replay buffer
-│   ├── coordination.py    ← experience sharing, action-only logic
-│   └── utils.py           ← shared helpers, logging, config loading
+│   ├── rl.py              ← RL training logic (SAC baseline + online RL)
+│   └── utils.py           ← config loading, seeding, logging helpers
 └── configs/
     └── experiment.yaml    ← all hyperparameters, never hardcode them
 ```
 
 ## Compute environments
 
-| Environment      | Hardware           | Use for                                           |
-|------------------|--------------------|-------------------------------------------------  |
-| MacBook Air      | Apple Silicon, CPU | Local dev, debugging, toy-scale tests, analysis   |
-| Google Colab Pro | A100/V100 GPU      | RL training, SLM fine-tuning, full experiments    |
-| DGX Spark (×2)   | NVIDIA GPU         | Distributed multi-agent deployment (when available)|
+| Environment      | Hardware           | Use for                                            |
+|------------------|--------------------|----------------------------------------------------|
+| MacBook Air      | Apple Silicon, CPU | Local dev, debugging, toy-scale tests, analysis    |
+| Google Colab Pro | A100/V100 GPU      | SAC training, SLM fine-tuning, full experiments    |
+| DGX Spark (×2)   | NVIDIA GPU         | Distributed multi-agent deployment (Phase 4)       |
 
 **Development workflow:**
 1. Develop and debug on MacBook (CPU, toy scale: 2 buildings, 10 episodes)
@@ -72,19 +87,19 @@ eclipse-thesis/
 
 - Python 3.10+, PyTorch 2.x
 - CityLearn v2 (Gymnasium-compatible)
-- Stable-Baselines3 for PPO/SAC baselines
-- Unsloth or HuggingFace PEFT + TRL for LoRA fine-tuning
+- Stable Baselines3 — SAC expert baseline (Phase 1)
+- HuggingFace PEFT + TRL or Unsloth — LoRA fine-tuning (Phase 3)
 - SLM candidates: Qwen3-4B/8B, LLaMA-3.1-8B, Nemotron-3-Nano
-- NVIDIA TensorRT-LLM + Triton for inference serving (Phase 2, DGX only)
+- NVIDIA TensorRT-LLM + Triton for inference serving (Phase 4, DGX only)
 - wandb for experiment tracking and artifact storage
-- Google Colab Pro for GPU compute
-- Hardware target: 2× NVIDIA DGX Spark (ECLIPSE grant, when available)
 
 ## Rules
 
 ### Before starting work
 - ALWAYS read `docs/PROGRESS.md` first to understand the current state
 - If unsure about project context, read `docs/CONTEXT.md`
+- For CityLearn API questions, consult `docs/CITYLEARN_API.md`
+- For observation/battery/prompting quirks, consult `docs/CITYLEARN_INSIGHTS.md`
 
 ### Code style
 - Type hints on all function signatures
@@ -119,20 +134,22 @@ eclipse-thesis/
 
 ## Key constraints
 
-- Joint reward function: both agents must receive the SAME reward at each timestep
-- Partial observability: Agent α sees buildings {1,2,3}, Agent β sees {4,5,6} — never crossed
-- Action-Only condition: NO explicit communication channel between agents
-- Online RL updates LoRA weights only, base model weights stay frozen
-- KL penalty against reference model is required to prevent catastrophic forgetting
-- Validation gate before Phase 2: single-agent SLM must reach ≥70% of expert RL performance
+- Joint reward: both agents must receive the SAME reward at each timestep (Phase 4)
+- Partial observability: Agent α sees buildings {1,2,3}, Agent β sees {4,5,6} — never crossed (Phase 4)
+- Action-Only condition: NO explicit communication channel between agents (Phase 4)
+- Online RL updates LoRA weights only; base SLM weights stay frozen (Phase 3+)
+- KL penalty against reference model required to prevent catastrophic forgetting (Phase 3+)
+- Validation gate before Phase 4: single-agent SLM must reach ≥70% of SAC expert performance
 
 ## Gotchas
 
 - CityLearn v2 API changed from v1 — use `citylearn.citylearn.CityLearnEnv`, not the old interface
+- `electrical_storage_soc` in the raw obs vector is bugged — read from `building.electrical_storage.soc[t]` directly
 - CityLearn rewards are negative (costs), lower is better — don't flip the sign
+- Battery charging is unconstrained: `+1.0` fills ~70% in one step and spikes district demand — use small actions (0.1–0.3)
+- Battery discharging is hardware-capped (~1.5 kWh/hr max) — `-1.0` is safe during peak hours
 - SLM action parsing can fail — always have a fallback (default to 0.0 / no-op)
 - GRPO needs multiple candidate generations per observation — budget for inference time
-- When both agents learn simultaneously, non-stationarity can cause instability — use slower learning rates
+- Non-stationarity when both agents learn simultaneously — use slower learning rates
 - Colab sessions can disconnect — ALWAYS checkpoint to Google Drive during long runs
-- Colab Pro gives A100 access but sessions have time limits — design scripts to be resumable
 - Test everything locally at debug scale before running full-scale on Colab
