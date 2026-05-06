@@ -14,6 +14,30 @@
 
 ## Log
 
+### 2026-05-05 — 03_slm_colab: self-contained notebook, minimal prompt [LOCAL]
+- **Architectural shift**: `03_slm_colab.ipynb` is now fully self-contained for SLM
+  experimentation — mirrors the Phase 1 pattern (experiment in notebook → promote to
+  src/ only when mature)
+- Removed all imports from `src/agent.py`; defined inline in notebook:
+  - `PRICE_PEAK_THRESHOLD`, `IRRADIANCE_LOW/HIGH_THRESHOLD`
+  - `price_bucket`, `carbon_bucket`, `solar_bucket`, `irradiance_bucket`
+  - `render_state()` — converts snapshot dict list to LLM prompt string
+  - `_ACTION_RE`, `parse_actions()` — XML tag action extraction with [-1,1] clip
+  - `make_policy_llm()` — binds LocalHFProvider into rollout-compatible policy fn
+- Added `make_minimal_prompt(n_buildings)` — the new default prompt:
+  - Task context + state variable meanings + output format only
+  - NO prescribed rules — SLM decides its own strategy
+  - ~120 words vs ~190 for rules-based prompt
+- Added `make_rules_prompt(n_buildings)` — kept as comparison baseline:
+  - Numbered priority rules (first-match-wins), same as old `make_slm_system_prompt`
+  - Easy swap: uncomment one line in § 10 `run-slm` cell
+- `LocalHFProvider.step()` now defaults to `make_minimal_prompt` (not `make_system_prompt`)
+- `src/env.py` is still imported (SEED, BUILDINGS, snapshot_state, reward fns) — stable
+- `src/agent.py` is NOT imported by notebook 03 at all
+- § 6b updated: Minimal vs Rules comparison table (dropped Full API prompt comparison)
+- `warmup` cell uses `make_minimal_prompt` for accurate per-call timing estimate
+- Title updated to reflect Phase 2 + self-contained design philosophy
+
 ### 2026-05-05 — 03_slm_colab merge: V2 Colab fixes + prompt/timing fixes [LOCAL]
 - Merged 03_slm_colabV2.ipynb (user's working Colab version) into 03_slm_colab.ipynb
 - V2 changes preserved (necessary to run on Colab):
