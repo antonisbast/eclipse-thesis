@@ -61,8 +61,9 @@ The environment runs in hourly timesteps. One episode = 1 simulated year = 8,760
 - GRPO preferred over PPO for online RL: no value network needed, works on full generations
 
 ### src/ — reusable Python modules
-- `env.py`: CityLearn wrappers and observation/action handling
-- `agent.py`: SLM agent class
+- `env.py`: CityLearn env factory, reward functions (`MERLINReward`, `EcoPeakBatteryReward`), `snapshot_state()`
+- `eval.py`: KPI evaluation — `evaluate()`, `comparison_table()`, `generalisation_gap()`, `EvalResult`
+- `agent.py`: SLM agent class, prompt construction, state-to-text pipeline, action parsing
 - `rl.py`: RL training logic (baselines and online RL)
 - `utils.py`: config loading, seeding, logging helpers
 - Add new modules as needed — this list is a starting point, not a constraint

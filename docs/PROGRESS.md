@@ -4,15 +4,28 @@
 
 ## Current status
 
-**Phase:** Phase 1, Month 2 — `src/env.py` + `src/agent.py` populated; `02_llm_policy.ipynb` created
-**Working on:** LLM-as-policy integration (Phase 2 groundwork)
+**Phase:** Phase 1, Month 2 — `src/env.py`, `src/eval.py`, `src/agent.py` populated; baselines benchmarked
+**Working on:** SAC expert training on Colab; SLM integration groundwork
 **Blockers:** None
 **Compute:** MacBook Air (local dev), Google Colab Pro (GPU training)
-**Next step:** Run `02_llm_policy.ipynb` locally to verify imports work; then train SAC on Colab
+**Next step:** Train SAC on Colab at full scale; start Phase 2 SLM integration
 
 ---
 
 ## Log
+
+### 2026-05-07 — src/eval.py: standardised evaluation module [LOCAL]
+- Created `src/eval.py` — all KPI logic extracted from `notebooks/01_env_setup.ipynb`:
+  - `CHALLENGE_KPIS` — mapping of short names to CityLearn v2 `evaluate_v2()` column names
+  - `district_kpis(env)` — pulls district-level rows from `evaluate_v2()` as a Series
+  - `challenge_score(env, label)` — computes C, G, R, 1-L, Phase I `(C+G)/2`, Combined `(C+G+D)/3`
+  - `zne_metric(env, label)` — solar generation, grid import, ZNE ratio, self-consumption ratio
+  - `evaluate(env, label)` — runs both above in one call, returns an `EvalResult` dataclass
+  - `comparison_table(results)` — builds challenge + ZNE DataFrames from a list of `EvalResult`s
+  - `generalisation_gap(train, unseen)` — Phase I and Combined gap between two `EvalResult`s
+  - `EvalResult` dataclass with `.phase1` and `.combined` convenience properties
+- `01_env_setup.ipynb` is now fully reflected in `src/`: env factory in `env.py`, KPIs in `eval.py`
+- Future notebooks/scripts use: `from src.eval import evaluate, comparison_table, generalisation_gap`
 
 ### 2026-05-05 — 03_slm_colab: self-contained notebook, minimal prompt [LOCAL]
 - **Architectural shift**: `03_slm_colab.ipynb` is now fully self-contained for SLM

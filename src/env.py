@@ -30,7 +30,7 @@ UNSEEN_BUILDINGS: list[int] = [6, 7, 8, 9, 10, 11]
 
 # ── Episode bounds ────────────────────────────────────────────────────────
 SIM_START: int = 0
-SIM_END:   int = 8758   # full year (8 759 hourly steps)
+SIM_END:   int = 8759   # full year (8 760 hourly steps, indices 0–8759)
 
 # ── Observation sets ──────────────────────────────────────────────────────
 # OBSERVATIONS_SAC: 13 variables — 9 real-time + 4 short-horizon forecasts.
@@ -133,7 +133,7 @@ class EcoPeakBatteryReward(RewardFunction):
             eco    = self.w_cost * norm_price + self.w_carbon * norm_carbon
             cost   = norm_net * eco
             base   = -(1.0 + np.sign(cost) * soc) * abs(cost)
-            peak   = -(norm_net ** 2) * self.w_peak
+            peak   = -(max(norm_net, 0.0) ** 2) * self.w_peak
             rewards.append(float(base + peak))
         return [float(sum(rewards))] if self.central_agent else rewards
 
@@ -251,7 +251,7 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
             "carbon_intensity":                 float(b.carbon_intensity.carbon_intensity[t]),
             "solar_generation":                 float(b.energy_simulation.solar_generation[t]),
             "non_shiftable_load":               float(b.non_shiftable_load[t]),
-            "electrical_storage_soc":           float(b.electrical_storage.soc[t - 1]) if t > 0 else 0.0,
+            "electrical_storage_soc":           float(b.electrical_storage.soc[t - 1]) if t > 0 else float(b.electrical_storage.soc[0]),
             "net_electricity_consumption_last": float(b.net_electricity_consumption[t - 1]) if t > 0 else 0.0,
             # ── Short-horizon forecasts ───────────────────────────────────
             "electricity_pricing_predicted_1":  _price_fc("electricity_pricing_predicted_1"),

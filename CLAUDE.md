@@ -23,7 +23,7 @@ Student: Antonios Bastoulis
 
 > **UPDATE THIS** after each work session.
 
-Phase 1, Month 2 — LLM-as-policy baseline functional; folder cleaned; moving toward SAC expert training.
+Phase 1, Month 2 — `src/env.py` and `src/eval.py` populated from `01_env_setup.ipynb`; LLM-as-policy baseline functional in `02_llm_policy.ipynb` and `03_slm_colab.ipynb`; moving toward full-scale SAC training on Colab.
 
 ## Four-phase plan
 
@@ -51,12 +51,14 @@ eclipse-thesis/
 │   ├── 01–05_*.py         ← env exploration, baselines, obs-to-text experiments
 │   └── _env_helpers.py
 ├── notebooks/             ← narrative + small-scale demos, run LOCALLY on CPU
-│   ├── 01_env_setup.ipynb
-│   ├── 04_llm_policy_clean.ipynb  ← LLM-as-policy baseline (current living artifact)
-│   └── (02–06 to be filled as phases progress)
+│   ├── 01_env_setup.ipynb ← env setup, RBC/SAC baselines, KPI evaluation (Phase 1)
+│   ├── 02_llm_policy.ipynb ← dual-agent LLM-as-policy, multi-provider (Phase 2 groundwork)
+│   ├── 03_slm_colab.ipynb ← local SLM inference on Colab GPU (self-contained)
+│   └── 04_llm_policy_clean.ipynb  ← earlier LLM-as-policy baseline (reference)
 ├── scripts/               ← full-scale training, run on COLAB or DGX SPARK (empty stubs)
-├── src/                   ← reusable modules (empty stubs, filled per phase)
-│   ├── env.py             ← CityLearn wrappers, observation encoding
+├── src/                   ← reusable modules
+│   ├── env.py             ← env factory, reward functions, snapshot_state()
+│   ├── eval.py            ← KPI evaluation: evaluate(), comparison_table(), generalisation_gap()
 │   ├── agent.py           ← SLM agent class, prompt construction, action parsing
 │   ├── rl.py              ← RL training logic (SAC baseline + online RL)
 │   └── utils.py           ← config loading, seeding, logging helpers
