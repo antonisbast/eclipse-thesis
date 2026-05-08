@@ -1,450 +1,255 @@
-"""LLM-as-policy agent: state renderer, provider abstraction, action parser.
+"""LLM-as-policy primitives shared by notebooks 02 (remote APIs) and 03 (local SLM).
 
-Imports state utilities from src.env. Reward functions and make_env live in src.env.
+Contents:
+- Threshold constants and bucket functions (price / carbon / solar / irradiance).
+- `render_state` — snapshot → human-readable prompt string.
+- `parse_actions` — extract `<action building=i>...</action>` tags into floats.
+- `make_minimal_prompt` — system prompt with discrete CHARGE/IDLE/DISCHARGE bins.
+- `make_policy_llm` — bind any `.step()`-providing provider into a rollout policy.
+- Reference policies: `policy_noop`, `policy_random`, `policy_rbc`.
 """
 
 from __future__ import annotations
 
-import concurrent.futures
-import logging
-import os
 import re
-import time
 from typing import Callable
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
-# ── Binning thresholds ────────────────────────────────────────────────────
-PRICE_PEAK_THRESHOLD:  float = 0.40
-CARBON_MID_THRESHOLD:  float = 0.14
-CARBON_HIGH_THRESHOLD: float = 0.17
-CARBON_PEAK_THRESHOLD: float = 0.19
-SOLAR_LOW_THRESHOLD:   float = 0.05
-SOLAR_HIGH_THRESHOLD:  float = 1.50
-
-# Irradiance forecast thresholds (W/m² — diffuse + direct combined).
-# Calibrated on 2022 dataset: dawn ≈ 50–200 W/m², clear noon ≈ 800–1800 W/m².
-IRRADIANCE_LOW_THRESHOLD:  float = 50.0
-IRRADIANCE_HIGH_THRESHOLD: float = 600.0
-
-_DAY_NAMES: dict[int, str] = {
-    1: "Sun", 2: "Mon", 3: "Tue", 4: "Wed",
-    5: "Thu", 6: "Fri", 7: "Sat", 8: "Hol",
-}
+from src.env import SEED
 
 
-# ── State bucketing ───────────────────────────────────────────────────────
-
-def price_bucket(v: float) -> str:
-    """Bin electricity price into LOW / PEAK."""
-    return "PEAK" if float(v) >= PRICE_PEAK_THRESHOLD else "LOW"
-
-
-def carbon_bucket(v: float) -> str:
-    """Bin carbon intensity into LOW / MID / HIGH / PEAK."""
-    x = float(v)
-    if x >= CARBON_PEAK_THRESHOLD: return "PEAK"
-    if x >= CARBON_HIGH_THRESHOLD: return "HIGH"
-    if x >= CARBON_MID_THRESHOLD:  return "MID"
-    return "LOW"
+# ── Thresholds ────────────────────────────────────────────────────────────────
+PRICE_PEAK_THRESHOLD: float      = 0.30   # $/kWh — above this = PEAK price
+IRRADIANCE_LOW_THRESHOLD: float  = 50     # W/m²  — below this = NONE
+IRRADIANCE_HIGH_THRESHOLD: float = 600    # W/m²  — above this = HIGH
 
 
-def solar_bucket(v: float) -> str:
-    """Bin solar generation (kWh) into NONE / LOW / HIGH."""
-    x = float(v)
-    if x >= SOLAR_HIGH_THRESHOLD: return "HIGH"
-    if x >= SOLAR_LOW_THRESHOLD:  return "LOW"
-    return "NONE"
+def price_bucket(v: float | None) -> str:
+    if v is None:
+        return "?"
+    return "PEAK" if v >= PRICE_PEAK_THRESHOLD else "LOW"
+
+
+def carbon_bucket(v: float | None) -> str:
+    if v is None:
+        return "?"
+    if v < 0.12:
+        return "LOW"
+    if v < 0.25:
+        return "MID"
+    return "HIGH"
+
+
+def solar_bucket(v: float | None) -> str:
+    if v is None:
+        return "?"
+    if v <= 0.0:
+        return "NONE"
+    if v < 0.5:
+        return "LOW"
+    return "HIGH"
 
 
 def irradiance_bucket(v: float | None) -> str:
-    """Bin total solar irradiance forecast (W/m², diffuse+direct) into NONE / LOW / HIGH.
-
-    Returns '?' when the forecast is unavailable (None).
-    Same symbolic scale as solar_bucket so the LLM can compare directly.
-    """
     if v is None:
         return "?"
-    x = float(v)
-    if x >= IRRADIANCE_HIGH_THRESHOLD: return "HIGH"
-    if x >= IRRADIANCE_LOW_THRESHOLD:  return "LOW"
-    return "NONE"
+    if v < IRRADIANCE_LOW_THRESHOLD:
+        return "NONE"
+    if v < IRRADIANCE_HIGH_THRESHOLD:
+        return "LOW"
+    return "HIGH"
 
 
-# ── State renderer ────────────────────────────────────────────────────────
-
+# ── State renderer ────────────────────────────────────────────────────────────
 def render_state(snap: list[dict]) -> str:
-    """Format a snapshot_state() sub-list into the LLM prompt string.
+    """Convert a snapshot (list of building dicts) into an LLM prompt string.
 
-    Buildings are labelled B0..B(n-1) from the start of snap, so passing
-    snap[0:3] for agent α and snap[3:6] for agent β both produce B0/1/2.
-
-    If forecast fields are present in the snap dicts (electricity_pricing_predicted_1/2
-    and solar_irradiance_predicted_1), a Forecast line is inserted between the district
-    header and the per-building table. Forecast fields missing or None are shown as '?'.
+    Buildings are renumbered locally from B0 — both agents see identical structure
+    regardless of which slice of the district they observe.
     """
-    d0     = snap[0]
-    hour   = d0["hour"]
-    day    = _DAY_NAMES.get(d0["day_type"], "?")
-    month  = d0["month"]
-    price  = d0["electricity_pricing"]
-    carbon = d0["carbon_intensity"]
+    if not snap:
+        return "(empty snapshot)"
+    d0   = snap[0]
+    hour = int(d0.get("hour", 1)) - 1
+    day  = int(d0.get("day_type", 1)) - 1
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+    prc = d0.get("electricity_pricing", None)
+    crb = d0.get("carbon_intensity", None)
 
     header = (
-        f"Month {month}, {day} {hour:02d}:00  |  "
-        f"price={price:.3f} ({price_bucket(price)})  |  "
-        f"carbon={carbon:.3f} ({carbon_bucket(carbon)})"
-    )
-    lines = [header]
-
-    # ── Short-horizon forecast line (district-level, from first building) ──
-    p1  = d0.get("electricity_pricing_predicted_1")
-    p2  = d0.get("electricity_pricing_predicted_2")
-    i1  = d0.get("solar_irradiance_predicted_1")
-    p1b = price_bucket(p1)  if p1 is not None else "?"
-    p2b = price_bucket(p2)  if p2 is not None else "?"
-    i1b = irradiance_bucket(i1)
-    lines.append(
-        f"Forecast:  price+6h={p1b}  price+12h={p2b}  solar+6h={i1b}"
+        f"Month {d0.get('month', '?')}, {day_names[day]} {hour:02d}:00  |  "
+        f"price={prc:.3f} ({price_bucket(prc)})  |  "
+        f"carbon={crb:.3f} ({carbon_bucket(crb)})"
     )
 
-    lines.append("Buildings:")
+    fp1 = d0.get("electricity_pricing_predicted_1", None)
+    fp2 = d0.get("electricity_pricing_predicted_2", None)
+    fi1 = d0.get("solar_irradiance_predicted_1", None)
+    forecast = (
+        f"Forecast:  price+6h={price_bucket(fp1)}  "
+        f"price+12h={price_bucket(fp2)}  "
+        f"solar+6h={irradiance_bucket(fi1)}"
+    )
+
+    lines = [header, forecast, "Buildings:"]
     for i, d in enumerate(snap):
+        soc  = d.get("electrical_storage_soc", 0.0)
+        sol  = d.get("solar_generation", 0.0)
+        load = d.get("non_shiftable_load", 0.0)
+        net  = d.get("net_electricity_consumption_last", 0.0)
         lines.append(
-            f"  B{i}: SoC={d['electrical_storage_soc'] * 100:5.1f}%  "
-            f"load={d['non_shiftable_load']:.2f} kWh  "
-            f"last_net={d['net_electricity_consumption_last']:+.2f} kWh  "
-            f"solar={solar_bucket(d['solar_generation'])}"
+            f"  B{i}: SoC={soc*100:5.1f}%  "
+            f"load={load:.2f} kWh  "
+            f"last_net={net:+.2f} kWh  "
+            f"solar={solar_bucket(sol)}"
         )
     return "\n".join(lines)
 
 
-# ── System prompt factory ─────────────────────────────────────────────────
+# ── Action parser — discrete CHARGE/DISCHARGE/IDLE bins ───────────────────────
+ACTION_RE = re.compile(
+    r"<action\s+building\s*=\s*(\d+)\s*>\s*(CHARGE|DISCHARGE|IDLE)_?(\d+)?\s*</action>",
+    re.IGNORECASE,
+)
 
-def make_system_prompt(n_buildings: int = 6) -> str:
-    """Generate a system prompt for an LLM battery controller managing n_buildings.
 
-    The output-format block and peak-demand estimates scale automatically with
-    n_buildings so the same function works for both the single-agent (n=6) and
-    dual-agent (n=3) cases.
+def parse_actions(text: str, n_buildings: int) -> list[float]:
+    """Extract per-building discrete actions and map to [-1.0, 1.0] floats.
+
+    CHARGE_<n>    →  +n/100
+    DISCHARGE_<n> →  -n/100
+    IDLE          →   0.0
+    Missing buildings default to 0.0.
     """
-    peak_kw    = n_buildings * 5   # ~5 kWh pulled per building at action +1.0
-    action_fmt = "\n".join(f"<action building={i}>VALUE</action>" for i in range(n_buildings))
+    acts = [0.0] * n_buildings
+    for m in ACTION_RE.finditer(text):
+        idx       = int(m.group(1))
+        direction = m.group(2).upper()
+        amt_str   = m.group(3)
 
-    return f"""\
-You are a battery controller for {n_buildings} buildings in a CityLearn district.
-Goal: minimise electricity cost, carbon emissions and district peak load.
+        val = 0.0
+        if direction == "CHARGE" and amt_str:
+            val = float(amt_str) / 100.0
+        elif direction == "DISCHARGE" and amt_str:
+            val = -float(amt_str) / 100.0
+        elif direction == "IDLE":
+            val = 0.0
 
-STATE VARIABLES (current timestep):
-- hour: 1..24 (CityLearn convention; 1..6=night, 7..18=day, 19..24=evening)
-- price: LOW (0.21 $/kWh) or PEAK (0.50 $/kWh)
-- carbon: LOW / MID / HIGH / PEAK (grid carbon intensity, higher is worse)
-- solar: NONE / LOW / HIGH (building-level PV output this hour)
-- SoC: battery state of charge as % of capacity
-- load: fixed building demand this hour (kWh)
-- last_net: net grid consumption last hour (+import / −export, kWh)
-
-FORECAST VARIABLES (use these to plan ahead):
-- price+6h / price+12h: expected electricity price 6 h and 12 h from now (LOW or PEAK)
-- solar+6h: expected solar irradiance 6 h from now (NONE / LOW / HIGH)
-
-HOW TO USE FORECASTS:
-- If price+6h=PEAK but current price=LOW → charge now before the expensive window opens.
-- If price+6h=LOW but current price=PEAK → discharge now; cheaper charging is coming soon.
-- If solar+6h=HIGH → preserve SoC headroom now so you can absorb free PV next step.
-- If solar+6h=NONE → do not hold back charging waiting for solar that won't arrive.
-
-BATTERY PHYSICS (critical):
-- Charging is UNCONSTRAINED: action +1.0 fills ~70% SoC in one step, pulling ~5 kWh from the
-  grid per building. Charging {n_buildings} buildings at +1.0 simultaneously creates a
-  ~{peak_kw} kWh demand spike that severely penalises the peak KPI.
-  Use SMALL charge actions (+0.1 to +0.3).
-- Discharging is HARDWARE-CAPPED at ~1.5 kWh/h regardless of magnitude. Action -1.0 is safe
-  and simply discharges as fast as the hardware allows.
-
-STRATEGY RULES:
-1. price=LOW  + price+6h=LOW:  trickle-charge (+0.1 to +0.2)
-2. price=LOW  + price+6h=PEAK: charge more aggressively (+0.2 to +0.3) before peak opens
-3. price=PEAK + price+6h=LOW:  discharge now (-1.0); cheap charging returns soon
-4. price=PEAK + price+6h=PEAK: keep discharging (-1.0) if SoC > 0.2
-5. solar=HIGH or solar+6h=HIGH: leave SoC headroom (<0.85) to absorb free PV
-6. Never charge a building with SoC >= 0.9; never discharge one with SoC <= 0.1
-
-REASONING PROTOCOL — think step by step before outputting actions:
-Step 1: Read current price + carbon + solar. Read price+6h, price+12h, solar+6h forecasts.
-Step 2: Decide the regime (e.g. "currently LOW, PEAK coming → charge moderately now").
-Step 3: For each building compute SoC headroom and apply the regime, avoiding sync spikes.
-Step 4: Output exactly {n_buildings} action lines.
-
-OUTPUT FORMAT (strict — nothing after the last </action> tag):
-{action_fmt}
-"""
+        if 0 <= idx < n_buildings:
+            acts[idx] = float(np.clip(val, -1.0, 1.0))
+    return acts
 
 
-# Keep the 6-building constant for single-agent notebooks / backward compat.
-SYSTEM_PROMPT: str = make_system_prompt(6)
-
-
-# ── SLM-optimised prompt ──────────────────────────────────────────────────
-
-def make_slm_system_prompt(n_buildings: int = 6) -> str:
-    """Compact system prompt optimised for small models (≤4B parameters).
-
-    Key differences from make_system_prompt():
-    - No "think step by step" reasoning protocol — the model outputs action
-      tags directly, saving 100-200 tokens per call and 2-3× wall-clock time.
-    - Priority rules are numbered and explicit — easier to follow than prose.
-    - ~40% fewer prompt tokens → faster prefill on every call.
-    - Designed to be used with MAX_NEW_TOKENS ≤ 150 in LocalHFProvider.
-
-    Rule priority (first match wins per building):
-      1. SoC ≥ 0.9                          → idle   (battery full)
-      2. SoC ≤ 0.1                          → idle   (battery empty)
-      3. price=PEAK and SoC > 0.1           → -1.0   (sell at high price)
-      4. price=LOW  and price+6h=PEAK       → +0.25  (pre-charge before peak)
-      5. solar=HIGH and SoC < 0.85          → +0.15  (absorb free solar)
-      6. price=LOW  and SoC < 0.9           → +0.15  (trickle charge)
-      7. otherwise                           → 0.0
-    """
+# ── Prompt ────────────────────────────────────────────────────────────────────
+def make_minimal_prompt(n_buildings: int = 6) -> str:
+    """Prompt with variable semantics, indirect instructions, and brief CoT."""
     action_fmt = "\n".join(
-        f"<action building={i}>VALUE</action>" for i in range(n_buildings)
+        f"<action building={i}>YOUR_CHOICE</action>" for i in range(n_buildings)
     )
-
     return f"""\
-You control batteries in {n_buildings} buildings. Output exactly {n_buildings} \
-charge/discharge values in the range [-1.0, +1.0].
-Positive = charge from grid. Negative = discharge to building. 0.0 = idle.
+You are an energy management agent for {n_buildings} buildings. Goal: minimize grid dependency and energy costs over time.
 
-RULES — apply to each building independently, stop at first match:
-1. SoC >= 0.9                          →  0.0   (full — do not overcharge)
-2. SoC <= 0.1                          →  0.0   (empty — do not over-discharge)
-3. price=PEAK  and SoC > 0.1          → -1.0   (discharge: sell stored energy at peak price)
-4. price=LOW   and price+6h=PEAK      → +0.25  (pre-charge before peak window opens)
-5. solar=HIGH  and SoC < 0.85        → +0.15  (absorb free solar; leave headroom)
-6. price=LOW   and SoC < 0.9         → +0.15  (trickle charge when electricity is cheap)
-7. otherwise                          →  0.0
+[Actions] — choose exactly one per building:
+CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISCHARGE_40, DISCHARGE_60, DISCHARGE_80, DISCHARGE_100
 
-IMPORTANT:
-- Charging pulls ~5 kWh per building from the grid. Use +0.1 to +0.3 — never +1.0.
-- Discharging is hardware-capped at ~1.5 kWh/h. Action -1.0 is always safe.
-- If price+6h=? or solar+6h=? (forecast unavailable), treat as LOW / NONE.
+[State Variables & Environment]
+- 'price': Current cost of grid electricity. PEAK indicates high cost.
+- 'solar': Renewable energy generated locally.
+- 'load': Energy demanded by the building's operations. High load means the building needs a lot of power.
+- 'SoC': Battery State of Charge (0% = empty, 100% = full).
+- Charging stores energy. Doing so when solar is HIGH or price is LOW is efficient, but charging from the grid increases district demand.
+- Discharging uses stored energy to serve the 'load', directly reducing grid dependency. This is highly beneficial when 'price' is PEAK or 'load' is high and SoC is sufficient.
+- Forecast fields show anticipated conditions 6 or 12 hours ahead, helping you plan when to store or release energy.
+-Avoid aggresive actions, prefer CHARGE_20,CHARGE_40,DISCHARGE_20 OR DISCHARGE_40.
+-Never charge when SOC is higher than 90% and never discharge when SOC is lower than 10%.
 
-OUTPUT — exactly {n_buildings} lines, nothing else before or after:
+[Reasoning]
+Before choosing actions, briefly analyze the state in a <thought> block.
+CRITICAL: Keep your thought extremely brief (UNDER 15 WORDS) to save computation time.
+
+[Output Format]
+<thought>
+Ultra-short analysis here...
+</thought>
 {action_fmt}
 """
 
 
-# ── Action parser ─────────────────────────────────────────────────────────
-
-_ACTION_RE = re.compile(r"<action building=(\d+)>\s*(-?\d*\.?\d+)\s*</action>")
-
-
-def parse_actions(raw: str, n_buildings: int = 6) -> list[float]:
-    """Extract per-building actions from a raw LLM response string.
-
-    Missing buildings default to 0.0. Values are clipped to [-1, 1].
-    """
-    by_id: dict[int, float] = {}
-    for bid, val in _ACTION_RE.findall(raw):
-        by_id[int(bid)] = float(val)
-    return [float(np.clip(by_id.get(i, 0.0), -1.0, 1.0)) for i in range(n_buildings)]
-
-
-# ── LLM provider ──────────────────────────────────────────────────────────
-
-class LLMProvider:
-    """Uniform wrapper over Anthropic and OpenAI-compatible chat APIs.
-
-    Supports Anthropic (native client), DeepSeek, Kimi/Moonshot, NVIDIA NIM,
-    and any endpoint that speaks the OpenAI chat completions schema.
-
-    Args:
-        name:     Friendly name used in logs and result labels.
-        model:    Model identifier (e.g. 'deepseek-chat', 'claude-haiku-4-5').
-        key_env:  Name of the environment variable holding the API key.
-        base_url: Override endpoint URL for OpenAI-compatible providers.
-    """
-
-    def __init__(self, name: str, model: str, key_env: str, base_url: str | None = None):
-        self.name  = name
-        self.model = model
-        self.label = f"{name}:{model}"
-
-        api_key = os.environ.get(key_env, "").strip()
-        if not api_key:
-            raise RuntimeError(f"Missing API key — set env var {key_env!r}")
-
-        if name == "anthropic":
-            try:
-                from anthropic import Anthropic  # type: ignore[import]
-            except ImportError as e:
-                raise ImportError("pip install anthropic") from e
-            self.client = Anthropic(api_key=api_key)
-            self._kind  = "anthropic"
-        else:
-            try:
-                from openai import OpenAI  # type: ignore[import]
-            except ImportError as e:
-                raise ImportError("pip install openai") from e
-            self.client = OpenAI(api_key=api_key, base_url=base_url)
-            self._kind  = "openai_compat"
-
-    def complete(
-        self,
-        system: str,
-        user: str,
-        max_tokens: int = 2000,
-        timeout_s: float | None = 45.0,
-    ) -> str:
-        """Call the model and return the assistant text.
-
-        Args:
-            timeout_s: Wall-clock seconds before raising TimeoutError.
-                       Set to None to disable (not recommended in rollouts).
-        """
-        def _call() -> str:
-            if self._kind == "anthropic":
-                resp = self.client.messages.create(
-                    model=self.model,
-                    system=system,
-                    messages=[{"role": "user", "content": user}],
-                    max_tokens=max_tokens,
-                    temperature=0.0,
-                )
-                return "".join(
-                    b.text for b in resp.content if getattr(b, "type", None) == "text"
-                )
-
-            kwargs: dict = dict(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user},
-                ],
-            )
-            if not self.model.startswith(("o1", "o3")):   # reasoning models reject temperature
-                kwargs["temperature"] = 1
-            resp = self.client.chat.completions.create(**kwargs)
-            return resp.choices[0].message.content
-
-        if timeout_s is None:
-            return _call()
-
-        # Do NOT use `with ThreadPoolExecutor() as ex:` — the context manager calls
-        # shutdown(wait=True) on __exit__, which blocks until the thread finishes even
-        # after a timeout.  Calling shutdown(wait=False) ourselves lets the hung thread
-        # linger in the background (it will eventually fail or complete) while the
-        # rollout continues without blocking.
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="llm_call"
-        )
-        future = executor.submit(_call)
-        try:
-            result = future.result(timeout=timeout_s)
-            executor.shutdown(wait=False)
-            return result
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            executor.shutdown(wait=False)   # never block — thread lingers harmlessly
-            raise TimeoutError(
-                f"{self.label} did not respond within {timeout_s:.0f}s"
-            )
-        except Exception:
-            executor.shutdown(wait=False)
-            raise
-
-    def step(
-        self,
-        state_text: str,
-        system: str | None = None,
-        n_buildings: int = 6,
-        max_retries: int = 2,
-        timeout_s: float = 45.0,
-    ) -> tuple[list[float], str, bool]:
-        """Query the LLM for one environment step.
-
-        Args:
-            state_text:   Rendered state string from render_state().
-            system:       System prompt. Defaults to make_system_prompt(n_buildings).
-            n_buildings:  Number of buildings to produce actions for.
-            max_retries:  Retry attempts on API errors (NOT on timeout — see below).
-            timeout_s:    Per-call wall-clock timeout in seconds.
-                          On timeout the step returns fallback zeros immediately
-                          without retrying (a hung endpoint will keep hanging).
-
-        Returns:
-            (actions, raw_response, used_fallback)
-        """
-        _system  = system or make_system_prompt(n_buildings)
-        last_raw = ""
-
-        for attempt in range(max_retries):
-            try:
-                last_raw = self.complete(
-                    _system, f"STATE:\n{state_text}", timeout_s=timeout_s
-                )
-                if _ACTION_RE.search(last_raw):
-                    return parse_actions(last_raw, n_buildings), last_raw, False
-                # Response parsed but no action tags found — retry
-                logger.debug("No action tags in response (attempt %d)", attempt + 1)
-            except TimeoutError as exc:
-                # Do NOT retry timeouts — if the endpoint is stuck it will stay stuck.
-                last_raw = f"TIMEOUT (attempt {attempt + 1}): {exc}"
-                logger.warning("LLM timeout at provider=%s t=%s", self.name, state_text[:40])
-                break
-            except Exception as exc:
-                last_raw = f"ERROR (attempt {attempt + 1}): {exc}"
-                if attempt < max_retries - 1:
-                    time.sleep(1.0)
-
-        logger.warning("LLM fallback at provider=%s — returning zeros", self.name)
-        return [0.0] * n_buildings, last_raw, True
-
-
-# ── Policy wrapper ────────────────────────────────────────────────────────
-
+# ── Policy adapter ────────────────────────────────────────────────────────────
 def make_policy_llm(
-    provider: LLMProvider,
+    provider,
     n_buildings: int = 6,
     agent_label: str = "",
     system: str | None = None,
-    timeout_s: float = 45.0,
     verbose: bool = True,
-) -> Callable[[list[dict], int], tuple[list[float], str, bool]]:
+    **step_kwargs,
+) -> Callable:
     """Bind a provider into a rollout-compatible policy function.
 
-    Args:
-        provider:     LLMProvider instance.
-        n_buildings:  Number of buildings this agent controls (3 for dual-agent, 6 for single).
-        agent_label:  Short label shown in verbose prints (e.g. 'α', 'β').
-        system:       Override system prompt. Defaults to make_system_prompt(n_buildings).
-        timeout_s:    Per-call timeout forwarded to provider.step().
-        verbose:      Print one line per step.
+    Provider must expose `.step(state_text, system, n_buildings, **kwargs)`
+    returning `(actions, raw_response, fallback_flag)`. Works with both
+    `APIProvider` (remote) and `LocalHFProvider` (local SLM).
 
-    Returns:
-        Callable (snap, t) -> (actions, raw, fallback) compatible with run_policy().
+    Verbose print format (one line per call):
+      t=  5 [α] B0:42%→+0.40  B1:61%→+0.00  B2:28%→-0.80  | '<action ...'
     """
-    _system = system or make_system_prompt(n_buildings)
-    _tag    = f"[{agent_label}]" if agent_label else ""
+    _system = system or make_minimal_prompt(n_buildings)
+    _label  = f"[{agent_label}] " if agent_label else ""
 
-    def _policy(snap: list[dict], t: int) -> tuple[list[float], str, bool]:
+    def policy(snap: list[dict], t: int):
         state_text = render_state(snap)
-        acts, raw, fb = provider.step(
+        acts, raw, fallback = provider.step(
             state_text,
             system=_system,
             n_buildings=n_buildings,
-            timeout_s=timeout_s,
+            **step_kwargs,
         )
         if verbose:
-            soc_str = ",".join(f"{d['electrical_storage_soc'] * 100:.0f}" for d in snap)
-            flag    = " [FALLBACK]" if fb else ""
-            print(
-                f"  [{provider.name:9s}]{_tag} t={t:3d} "
-                f"price={snap[0]['electricity_pricing']:.2f} "
-                f"soc%=[{soc_str}] -> {[f'{a:+.2f}' for a in acts]}{flag}"
+            fb_tag   = " [FALLBACK]" if fallback else ""
+            bldg_str = "  ".join(
+                f"B{i}:{snap[i]['electrical_storage_soc']*100:.0f}%→{acts[i]:+.2f}"
+                for i in range(len(acts))
             )
-        return acts, raw, fb
+            print(
+                f"  t={t:3d} {_label}{bldg_str}"
+                f"  |  {raw.replace(chr(10), ' ')[:55].strip()!r}{fb_tag}"
+            )
+        return acts, raw, fallback
 
-    return _policy
+    return policy
+
+
+# ── Reference policies ────────────────────────────────────────────────────────
+def policy_noop(snap: list[dict], t: int) -> list[float]:
+    return [0.0] * len(snap)
+
+
+_rng = np.random.default_rng(SEED)
+
+
+def policy_random(snap: list[dict], t: int) -> list[float]:
+    return _rng.uniform(-1.0, 1.0, size=len(snap)).tolist()
+
+
+def policy_rbc(snap: list[dict], t: int) -> list[float]:
+    """Price + solar aware rule-based controller.
+
+    Exploits battery asymmetry: charge small (avoids demand spikes),
+    discharge full (-1.0 is hardware-capped and safe).
+    """
+    acts = []
+    for d in snap:
+        soc = d["electrical_storage_soc"]
+        prc = d["electricity_pricing"]
+        sol = d["solar_generation"]
+        if solar_bucket(sol) == "HIGH" and soc < 0.85:
+            acts.append(0.2)
+        elif price_bucket(prc) == "PEAK" and soc > 0.10:
+            acts.append(-1.0)
+        elif price_bucket(prc) == "LOW" and soc < 0.90:
+            acts.append(0.25)
+        else:
+            acts.append(0.0)
+    return acts

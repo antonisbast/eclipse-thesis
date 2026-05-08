@@ -224,35 +224,44 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
     None if the attributes are unavailable (e.g. when using a custom dataset
     that does not include forecast columns).
     """
-    t = env.time_step
     out = []
+
+    def _at(arr, idx: int):
+        """Safe index — clamps to the last valid entry of `arr`."""
+        return arr[min(idx, len(arr) - 1)]
+
     for b in env.buildings:
+        # Clamp to last valid index — env.time_step can sit one past the end
+        # after termination (CityLearn 2.6 behaviour). Some arrays are
+        # shorter than energy_simulation.* (e.g. non_shiftable_load is
+        # populated up to t-1), so we clamp per-array via _at().
+        t = env.time_step
         # ── Forecast helpers ──────────────────────────────────────────────
         def _price_fc(attr: str) -> float | None:
             try:
-                return float(getattr(b.pricing, attr)[t])
+                return float(_at(getattr(b.pricing, attr), t))
             except Exception:
                 return None
 
         def _irr_sum_fc(attr_diffuse: str, attr_direct: str) -> float | None:
             try:
-                diffuse = float(getattr(b.weather, attr_diffuse)[t])
-                direct  = float(getattr(b.weather, attr_direct)[t])
+                diffuse = float(_at(getattr(b.weather, attr_diffuse), t))
+                direct  = float(_at(getattr(b.weather, attr_direct), t))
                 return diffuse + direct
             except Exception:
                 return None
 
         out.append({
             # ── Real-time signals ─────────────────────────────────────────
-            "month":                            int(b.energy_simulation.month[t]),
-            "day_type":                         int(b.energy_simulation.day_type[t]),
-            "hour":                             int(b.energy_simulation.hour[t]),
-            "electricity_pricing":              float(b.pricing.electricity_pricing[t]),
-            "carbon_intensity":                 float(b.carbon_intensity.carbon_intensity[t]),
-            "solar_generation":                 float(b.energy_simulation.solar_generation[t]),
-            "non_shiftable_load":               float(b.non_shiftable_load[t]),
-            "electrical_storage_soc":           float(b.electrical_storage.soc[t - 1]) if t > 0 else float(b.electrical_storage.soc[0]),
-            "net_electricity_consumption_last": float(b.net_electricity_consumption[t - 1]) if t > 0 else 0.0,
+            "month":                            int(_at(b.energy_simulation.month, t)),
+            "day_type":                         int(_at(b.energy_simulation.day_type, t)),
+            "hour":                             int(_at(b.energy_simulation.hour, t)),
+            "electricity_pricing":              float(_at(b.pricing.electricity_pricing, t)),
+            "carbon_intensity":                 float(_at(b.carbon_intensity.carbon_intensity, t)),
+            "solar_generation":                 float(_at(b.energy_simulation.solar_generation, t)),
+            "non_shiftable_load":               float(_at(b.non_shiftable_load, t)),
+            "electrical_storage_soc":           float(_at(b.electrical_storage.soc, t - 1)) if t > 0 else float(b.electrical_storage.soc[0]),
+            "net_electricity_consumption_last": float(_at(b.net_electricity_consumption, t - 1)) if t > 0 else 0.0,
             # ── Short-horizon forecasts ───────────────────────────────────
             "electricity_pricing_predicted_1":  _price_fc("electricity_pricing_predicted_1"),
             "electricity_pricing_predicted_2":  _price_fc("electricity_pricing_predicted_2"),
