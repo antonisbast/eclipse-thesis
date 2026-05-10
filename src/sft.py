@@ -166,10 +166,16 @@ def format_action_block(actions: Iterable[float], n_buildings: int) -> str:
 # ── Prompts ───────────────────────────────────────────────────────────────
 
 def make_sft_prompt(n_buildings: int = 6) -> str:
-    """SFT-time prompt. Drops the <thought> block from the inference prompt
-    — we are distilling actions only, no rationales, so the assistant target
-    is just the <action ...> lines.
+    """SFT/eval prompt. Mirrors nb03's `make_minimal_prompt` but WITHOUT the
+    [Reasoning] / <thought> block, since the SAC teacher provides no rationale.
+
+    The SAME text is used at training and at inference — any drift between the
+    two creates an OOD evaluation and destroys KPIs (see the CoT eval blowup
+    in nb05 § 19).
     """
+    action_fmt = "\n".join(
+        f"<action building={i}>YOUR_CHOICE</action>" for i in range(n_buildings)
+    )
     return f"""\
 You are an energy management agent for {n_buildings} buildings. Goal: minimize grid dependency and energy costs over time.
 
@@ -179,16 +185,66 @@ CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISC
 [State Variables & Environment]
 - 'price': Current cost of grid electricity. PEAK indicates high cost.
 - 'solar': Renewable energy generated locally.
-- 'load': Energy demanded by the building's operations.
+- 'load': Energy demanded by the building's operations. High load means the building needs a lot of power.
 - 'SoC': Battery State of Charge (0% = empty, 100% = full).
-- Charging stores energy (efficient when solar HIGH or price LOW).
-- Discharging serves load and reduces grid import (best when price PEAK and SoC sufficient).
-- Forecast fields show conditions 6 or 12 hours ahead.
+- Charging stores energy. Doing so when solar is HIGH or price is LOW is efficient, but charging from the grid increases district demand.
+- Discharging uses stored energy to serve the 'load', directly reducing grid dependency. This is highly beneficial when 'price' is PEAK or 'load' is high and SoC is sufficient.
+- Forecast fields show anticipated conditions 6 or 12 hours ahead, helping you plan when to store or release energy.
+- Avoid aggressive actions, prefer CHARGE_20, CHARGE_40, DISCHARGE_20 or DISCHARGE_40.
+- Never charge when SoC is higher than 90% and never discharge when SoC is lower than 10%.
 
 [Output Format]
 Output exactly {n_buildings} action lines, one per building, and nothing else:
-{chr(10).join(f'<action building={i}>YOUR_CHOICE</action>' for i in range(n_buildings))}
+{action_fmt}
 """
+
+
+# ── Dataset filtering ─────────────────────────────────────────────────────
+
+_SOC_RE = re.compile(r"SoC=\s*([\d.]+)%")
+
+
+def filter_uninformative_rows(
+    rows: list[dict],
+    soc_eps: float = 0.02,
+    act_eps: float = 0.05,
+) -> list[dict]:
+    """Drop rows where EVERY building's action is physically a no-op.
+
+    A per-building (SoC, action) pair is uninformative when:
+      • SoC ≤ soc_eps        AND  action < -act_eps   (discharge from empty)
+      • SoC ≥ 1 - soc_eps    AND  action > +act_eps   (charge into full)
+      • |action| < act_eps                             (near-IDLE)
+
+    These (state, action) pairs carry no learnable signal — the action token
+    has no effect on the next state — and dilute the gradient toward the
+    marginal "DISCHARGE_20" mode. A row is dropped only when ALL buildings
+    are uninformative simultaneously.
+
+    SoC is parsed from the `prompt` text (no schema change needed). If parsing
+    fails (mismatched length), the row is kept.
+    """
+    kept: list[dict] = []
+    for row in rows:
+        socs_pct = _SOC_RE.findall(row.get("prompt", ""))
+        acts     = row.get("actions_float", [])
+        if not socs_pct or len(socs_pct) != len(acts):
+            kept.append(row)
+            continue
+
+        socs = [float(s) / 100.0 for s in socs_pct]
+        noop = 0
+        for soc, a in zip(socs, acts):
+            a = float(a)
+            if abs(a) < act_eps:
+                noop += 1
+            elif soc <= soc_eps and a < 0:
+                noop += 1
+            elif soc >= 1.0 - soc_eps and a > 0:
+                noop += 1
+        if noop < len(socs):
+            kept.append(row)
+    return kept
 
 
 # ── Trajectory dumper ─────────────────────────────────────────────────────
