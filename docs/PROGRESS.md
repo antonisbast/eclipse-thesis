@@ -4,15 +4,31 @@
 
 ## Current status
 
-**Phase:** Phase 1, Month 2 — `src/env.py`, `src/eval.py`, `src/agent.py` populated; baselines benchmarked
-**Working on:** SAC expert training on Colab; SLM integration groundwork
+**Phase:** Phase 1 + Phase 2 zero-shot complete; transitioning into Phase 3 (fine-tuning) via SAC→SLM distillation.
+- Phase 1 — `src/env.py`, `src/eval.py` populated; RBC + SAC baselines benchmarked in `01_env_setup.ipynb`
+- Phase 2 — zero-shot LLM-as-policy working end-to-end: remote APIs in `02_llm_policy.ipynb` (Anthropic, DeepSeek, Kimi, NVIDIA NIM, Gemma); local SLMs on Colab in `03_slm_colab.ipynb` (Qwen, Phi, Llama, Gemma). Reusable code in `src/agent.py`, `src/providers.py`, `src/rollout.py`.
+
+**Working on (IN PROGRESS, not completed):**
+- `04_sac_distill_dataset.ipynb` — full-year SAC rollout dumped to `(state_text, action_token)` JSONL via `src/sft.py`
+- `05_sft_gemma_colab.ipynb` — LoRA SFT on Gemma in Colab via Unsloth, consuming the JSONL above
+- `src/sft.py` — `action_to_token` (11-bucket discretisation), `dump_sac_trajectory_jsonl`, `make_sft_prompt`
+
 **Blockers:** None
-**Compute:** MacBook Air (local dev), Google Colab Pro (GPU training)
-**Next step:** Train SAC on Colab at full scale; start Phase 2 SLM integration
+**Compute:** MacBook Air (local dev / nb 04 dataset gen), Google Colab Pro (SAC full-scale training, SFT in nb 05)
+**Next step:** Run distillation dataset generation end-to-end → run LoRA SFT on Colab → evaluate fine-tuned SLM in CityLearn against zero-shot SLM and SAC baselines (validation gate: ≥70 % of SAC).
 
 ---
 
 ## Log
+
+### 2026-05-10 — Phase 2→3 transition: SAC→SLM distillation pipeline scaffolded [LOCAL]
+- Confirmed Phase 1 + Phase 2 zero-shot are complete and stable: notebooks 01/02/03 work end-to-end; `src/` cleanly hosts env, agent, providers, rollout, eval.
+- New work-in-progress (commits `cca9eb11`, `c943a802`):
+  - `notebooks/04_sac_distill_dataset.ipynb` — runs trained SAC for one full CityLearn year and dumps per-step `(state_text, action_token)` pairs as JSONL for SFT.
+  - `notebooks/05_sft_gemma_colab.ipynb` — Colab notebook for LoRA SFT on Gemma using Unsloth, consuming the JSONL produced by nb 04.
+  - `src/sft.py` — distillation helpers: `action_to_token` discretises continuous SAC actions in `[-1, 1]` into the same 11-bucket vocabulary the inference prompt uses (`CHARGE_20…100`, `IDLE`, `DISCHARGE_20…100`, 20% steps); `dump_sac_trajectory_jsonl` for dataset emission; `make_sft_prompt` (drops `<thought>` block — distilling without rationales).
+- **Status: pipeline scaffolded but experiments not yet run** — dataset generation and Colab fine-tuning runs still pending.
+- Updated `CLAUDE.md` (Current phase + project-structure tree) and this file to reflect the actual state of `src/` (6 modules, not the 5 originally planned: `agent.py`, `env.py`, `eval.py`, `providers.py`, `rollout.py`, `sft.py`; planned `rl.py`/`utils.py` not yet created).
 
 ### 2026-05-07 — src/eval.py: standardised evaluation module [LOCAL]
 - Created `src/eval.py` — all KPI logic extracted from `notebooks/01_env_setup.ipynb`:

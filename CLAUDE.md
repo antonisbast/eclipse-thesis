@@ -23,7 +23,9 @@ Student: Antonios Bastoulis
 
 > **UPDATE THIS** after each work session.
 
-Phase 1, Month 2 — `src/env.py` and `src/eval.py` populated from `01_env_setup.ipynb`; LLM-as-policy baseline functional in `02_llm_policy.ipynb` and `03_slm_colab.ipynb`; moving toward full-scale SAC training on Colab.
+**Phase 1 + Phase 2 zero-shot complete.** Notebooks 01 (env, RBC, SAC), 02 (remote-API LLM-as-policy, dual-agent), and 03 (local SLM-as-policy on Colab) are working. Reusable code extracted to `src/`: `env.py`, `agent.py`, `providers.py`, `rollout.py`, `eval.py`.
+
+**In progress — Phase 2→3 transition: SAC→SLM behavior-cloning distillation.** Notebook 04 (`04_sac_distill_dataset.ipynb`) generates `(state_text, action_token)` JSONL from a trained SAC rollout; notebook 05 (`05_sft_gemma_colab.ipynb`) runs LoRA SFT on Gemma in Colab via Unsloth. Pipeline helpers live in `src/sft.py`. **Experiments not yet completed** — dataset generation and fine-tuning runs still pending.
 
 ## Four-phase plan
 
@@ -50,18 +52,20 @@ eclipse-thesis/
 ├── sandbox/               ← one-off exploration scripts (not imported anywhere)
 │   ├── 01–05_*.py         ← env exploration, baselines, obs-to-text experiments
 │   └── _env_helpers.py
-├── notebooks/             ← narrative + small-scale demos, run LOCALLY on CPU
-│   ├── 01_env_setup.ipynb ← env setup, RBC/SAC baselines, KPI evaluation (Phase 1)
-│   ├── 02_llm_policy.ipynb ← dual-agent LLM-as-policy, multi-provider (Phase 2 groundwork)
-│   ├── 03_slm_colab.ipynb ← local SLM inference on Colab GPU (self-contained)
-│   └── 04_llm_policy_clean.ipynb  ← earlier LLM-as-policy baseline (reference)
+├── notebooks/             ← narrative + small-scale demos, run LOCALLY on CPU or COLAB GPU
+│   ├── 01_env_setup.ipynb           ← env setup, RBC/SAC baselines, KPI evaluation (Phase 1)
+│   ├── 02_llm_policy.ipynb          ← dual-agent LLM-as-policy, remote APIs (Phase 2)
+│   ├── 03_slm_colab.ipynb           ← local SLM inference on Colab GPU (Phase 2)
+│   ├── 04_sac_distill_dataset.ipynb ← SAC rollout → (state_text, action_token) JSONL [IN PROGRESS]
+│   └── 05_sft_gemma_colab.ipynb     ← LoRA SFT on Gemma via Unsloth (Colab) [IN PROGRESS]
 ├── scripts/               ← full-scale training, run on COLAB or DGX SPARK (empty stubs)
 ├── src/                   ← reusable modules
 │   ├── env.py             ← env factory, reward functions, snapshot_state()
 │   ├── eval.py            ← KPI evaluation: evaluate(), comparison_table(), generalisation_gap()
-│   ├── agent.py           ← SLM agent class, prompt construction, action parsing
-│   ├── rl.py              ← RL training logic (SAC baseline + online RL)
-│   └── utils.py           ← config loading, seeding, logging helpers
+│   ├── agent.py           ← prompt construction, render_state, parse_actions, reference policies
+│   ├── providers.py       ← APIProvider (remote) + LocalHFProvider (local HF) — same .step() interface
+│   ├── rollout.py         ← run_policy, run_policy_dual_agent, summary helpers
+│   └── sft.py             ← SAC→SLM distillation helpers: action_to_token, dump JSONL, SFT prompt
 └── configs/
     └── experiment.yaml    ← all hyperparameters, never hardcode them
 ```
@@ -148,8 +152,9 @@ eclipse-thesis/
 - CityLearn v2 API changed from v1 — use `citylearn.citylearn.CityLearnEnv`, not the old interface
 - `electrical_storage_soc` in the raw obs vector is bugged — read from `building.electrical_storage.soc[t]` directly
 - CityLearn rewards are negative (costs), lower is better — don't flip the sign
-- Battery charging is unconstrained: `+1.0` fills ~70% in one step and spikes district demand — use small actions (0.1–0.3)
-- Battery discharging is hardware-capped (~1.5 kWh/hr max) — `-1.0` is safe during peak hours
+- Battery charge and discharge are roughly symmetric in ΔSoC: `±0.20` ≈ ±14–17 pp/step, `±1.0` ≈ ±70 pp/step. There is **no asymmetric hardware cap** on discharge — the older "1.5 kWh/hr discharge cap" claim was wrong (verified in nb 03 on `citylearn_challenge_2022_phase_all`)
+- `+1.0` charging across all buildings simultaneously spikes district demand — use small actions (0.1–0.3) when charging
+- Discharging is action-driven, not load-driven: same `|action|` produces the same SoC drop regardless of building load. Load only affects whether surplus is exported. Size discharge to roughly match `load − solar` during peak; over-discharge exports cheaply
 - SLM action parsing can fail — always have a fallback (default to 0.0 / no-op)
 - GRPO needs multiple candidate generations per observation — budget for inference time
 - Non-stationarity when both agents learn simultaneously — use slower learning rates
