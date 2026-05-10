@@ -215,14 +215,6 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
     values. Always safe to call right after env.reset() or env.step().
 
     Forecast fields included
-    ────────────────────────
-    electricity_pricing_predicted_1  : expected price +6 h ($/kWh) — same scale as current price
-    electricity_pricing_predicted_2  : expected price +12 h ($/kWh)
-    solar_irradiance_predicted_1     : diffuse + direct irradiance +6 h (W/m²)
-
-    All three are read from building sub-objects directly and fall back to
-    None if the attributes are unavailable (e.g. when using a custom dataset
-    that does not include forecast columns).
     """
     out = []
 

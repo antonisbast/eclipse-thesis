@@ -1,4 +1,4 @@
-"""Standardised evaluation utilities for the ECLIPSE thesis.
+"""Standardised evaluation utilities for the thesis.
 
 All notebooks and scripts import from here — no KPI logic lives in cells.
 

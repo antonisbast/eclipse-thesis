@@ -2,7 +2,7 @@
 
 **MSc Thesis · University of West Attica · AIDL program**
 Student: Antonios Bastoulis · Supervisor: Dr. Panagiotis Kasnesis
-Last updated: 2026-05-08
+Last updated: 2026-05-10
 
 ---
 
@@ -68,9 +68,12 @@ deployment. Development on MacBook Air, training on Google Colab Pro.
 
 - `electrical_storage_soc` in the raw obs vector is bugged (next-step init, always 0).
   → We read SoC directly from `building.electrical_storage.soc[t]` via `snapshot_state()`.
-- Battery is **asymmetric**: `+1.0` charge fills ~70% in one step and spikes district
-  demand; `-1.0` discharge is hardware-capped at ~1.5 kWh/hr and is therefore safe at
-  peak. Our RBC and prompts exploit this.
+- Battery charge and discharge are **roughly symmetric** in ΔSoC: `±0.20` ≈ ±14–17 pp/step,
+  `±1.0` ≈ ±70 pp/step. There is **no asymmetric hardware cap on discharge** — the older
+  "1.5 kWh/hr discharge cap" claim was wrong (verified on
+  `citylearn_challenge_2022_phase_all` in nb 03). `+1.0` charge across all buildings
+  simultaneously still spikes district demand → use small charge actions (0.1–0.3) and
+  size discharge to roughly match `load − solar` during peak.
 - In CityLearn 2.6 `env.time_step` advances one past the last valid index after
   termination, and `non_shiftable_load` is shorter than `energy_simulation.*`.
   → `snapshot_state()` clamps each per-array index defensively.
@@ -88,17 +91,21 @@ eclipse-thesis/
 │   ├── CITYLEARN_API.md            ← v2 API reference
 │   └── CITYLEARN_INSIGHTS.md       ← obs quirks, battery dynamics, prompting tips
 ├── notebooks/
-│   ├── 01_env_setup.ipynb          ← env, RBC/SAC, KPIs (Phase 1)
-│   ├── 02_llm_policy.ipynb         ← dual-agent LLM-as-policy, multi-provider
-│   ├── 03_slm_colab.ipynb          ← local SLM on Colab GPU
-│   └── 04_llm_policy_clean.ipynb   ← earlier reference baseline
+│   ├── 01_env_setup.ipynb            ← env, RBC/SAC, KPIs (Phase 1)
+│   ├── 02_llm_policy.ipynb           ← dual-agent LLM-as-policy, multi-provider (Phase 2)
+│   ├── 03_slm_colab.ipynb            ← local SLM on Colab GPU (Phase 2)
+│   ├── 04_sac_distill_dataset.ipynb  ← SAC rollout → JSONL for SFT [IN PROGRESS]
+│   └── 05_sft_gemma_colab.ipynb      ← LoRA SFT on Gemma via Unsloth (Colab) [IN PROGRESS]
+├── archive/notebooks/
+│   └── 04_llm_policy_clean.ipynb     ← earlier reference baseline (archived 2026-05-10)
 ├── src/
-│   ├── env.py                      ← env factory, reward fns, snapshot_state
-│   ├── eval.py                     ← KPIs, comparison_table, generalisation_gap
-│   ├── agent.py                    ← buckets, render_state, parse_actions, prompt, policies
-│   ├── providers.py                ← APIProvider (remote) + LocalHFProvider (GPU)
-│   └── rollout.py                  ← run_policy, run_policy_dual_agent, summaries
-├── scripts/                        ← (Phase 1 SAC, Phase 3 fine-tune — TBD)
+│   ├── env.py                        ← env factory, reward fns, snapshot_state
+│   ├── eval.py                       ← KPIs, comparison_table, generalisation_gap
+│   ├── agent.py                      ← buckets, render_state, parse_actions, prompt, policies
+│   ├── providers.py                  ← APIProvider (remote) + LocalHFProvider (GPU)
+│   ├── rollout.py                    ← run_policy, run_policy_dual_agent, summaries
+│   └── sft.py                        ← SAC→SLM distillation: action_to_token, JSONL dump, SFT prompt
+├── scripts/                          ← (Phase 1 SAC, Phase 3 fine-tune — TBD)
 └── configs/experiment.yaml         ← all hyperparameters
 ```
 
@@ -106,13 +113,11 @@ eclipse-thesis/
 
 ## 4. What's been done
 
-### Phase 1 — Expert baselines (in progress)
+### Phase 1 — Expert baselines (complete on the notebook side)
 
 **Done:**
-- Sandbox exploration (`sandbox/01–05_*.py`) — env behaviour, obs quirks, PPO smoke test,
-  obs-to-text experiments.
-- `notebooks/01_env_setup.ipynb` — env factory, RBC/no-op/random baselines, KPI
-  evaluation against the CityLearn 2022 challenge metrics.
+- `notebooks/01_env_setup.ipynb` — env factory, RBC/no-op/random baselines, SAC training
+  loop, KPI evaluation against the CityLearn 2022 challenge metrics.
 - `src/env.py` — `make_env()` with `obs_set` (`sac` / `llm`) and `reward_fn` (`merlin` /
   `eco`) switches; custom rewards `MERLINReward`, `EcoPeakBatteryReward`;
   `snapshot_state()` exposing 12 fields per building (9 real-time + 3 forecasts).
@@ -120,24 +125,27 @@ eclipse-thesis/
   `EvalResult` dataclass; both Phase-I `(C+G)/2` and Combined `(C+G+D)/3` scores.
 
 **Still to do:**
-- Train SAC at full scale on Colab (300 episodes × 5 seeds), log to wandb.
-- Lock in headline KPIs vs all baselines.
+- Promote SAC training to a `scripts/` entry with checkpointing + wandb (currently
+  notebook-resident).
+- Run SAC at full scale on Colab (300 episodes × 5 seeds) and lock in headline KPIs
+  vs all baselines.
 
-### Phase 2 — SLM integration (groundwork done)
+### Phase 2 — SLM integration (zero-shot complete)
 
 **Done:**
-- `notebooks/02_llm_policy.ipynb` — dual-agent (α/β), 4 remote providers tested with
-  zero-shot prompting:
+- `notebooks/02_llm_policy.ipynb` — dual-agent (α: B0-2, β: B3-5) with 5 remote
+  providers tested zero-shot:
   - Anthropic `claude-haiku-4-5`
   - DeepSeek `deepseek-chat`
   - Kimi `kimi-k2.5` (requires `temperature=1`)
-  - OpenAI `gpt-5.4-nano` (reasoning family — uses `max_completion_tokens`,
-    forced `temperature=1`)
+  - NVIDIA NIM `meta/llama-3.1-8b-instruct`
+  - Google Gemma `gemma-3-12b-it` (Google AI Studio OpenAI-compat endpoint)
   Each provider lives in its own cell so a hung call can be interrupted without
   losing the others. `LLM_TIMEOUT_S=45 s` enforced via background thread.
 - `notebooks/03_slm_colab.ipynb` — local SLM inference on Colab T4. Self-contained, runs
   end-to-end with a single Run-All. Supports 4-bit quantization for ≥7B models.
-  Tested with Qwen2.5-1.5B (~2 min/rollout), Qwen3-4B (~5 min), Llama-3-8B (4-bit).
+  Tested with Qwen2.5-1.5B (~2 min/rollout), Qwen3-4B (~5 min), Llama-3-8B (4-bit),
+  Gemma (with system-role workaround).
 - **Discrete action bins** stabilised: `CHARGE_{20,40,60,80,100}` / `IDLE` /
   `DISCHARGE_{20,40,60,80,100}`. Parsed via `<action building=i>...</action>` regex,
   clipped to `[-1, 1]`, fallback to 0.0 on parse failure.
@@ -148,8 +156,8 @@ eclipse-thesis/
   + forecast line (`price+6h`, `price+12h`, `solar+6h`) + per-building line
   (`SoC%, load, last_net, solar bucket`). Each agent sees buildings renumbered locally
   from B0 — identical structure regardless of which 3 buildings it controls.
-- **Code consolidation (today, 2026-05-08):** the inline notebook code was extracted
-  into reusable `src/` modules. `notebooks/02` and `notebooks/03` now share:
+- **Code consolidation:** inline notebook code was extracted into reusable `src/`
+  modules. `notebooks/02` and `notebooks/03` now share:
   - `src/agent.py` — buckets, `render_state`, `parse_actions`, `make_minimal_prompt`,
     `make_policy_llm`, reference policies (`noop`, `random`, `rbc`).
   - `src/providers.py` — `APIProvider` (Anthropic + OpenAI-compat with per-model
@@ -160,14 +168,29 @@ eclipse-thesis/
     `per_agent_summary`.
 
 **Still to do:**
-- Refactor `02` and `03` to import from `src/` instead of inlining (keeps the
-  notebooks thin per the project rule).
-- Land single-agent + dual-agent SLM results vs SAC baseline.
+- Land single-agent + dual-agent SLM results vs SAC baseline (waiting on Phase-1 SAC
+  full-scale run).
 
-### Phase 3 — SLM fine-tuning (not started)
+### Phase 3 — SLM fine-tuning (in progress: SAC→SLM behavior-cloning distillation)
 
-Planned: LoRA + GRPO. KL penalty against frozen base. Multiple candidate generations
-per observation. Reference policy = best zero-shot or imitation-warmed SLM.
+**Done (scaffolding only):**
+- `notebooks/04_sac_distill_dataset.ipynb` — runs trained SAC for one full CityLearn
+  year and dumps per-step `(state_text, action_token)` pairs as JSONL.
+- `notebooks/05_sft_gemma_colab.ipynb` — LoRA SFT on Gemma in Colab via Unsloth,
+  consuming the JSONL produced by nb 04.
+- `src/sft.py`:
+  - `action_to_token` discretises continuous SAC actions in `[-1, 1]` into the same
+    11-bucket vocabulary the inference prompt uses (20 % steps).
+  - `dump_sac_trajectory_jsonl` for dataset emission.
+  - `make_sft_prompt` drops the `<thought>` block — distilling actions only, no
+    rationales (avoids fabricating CoT for SAC actions).
+
+**Still to do:**
+- Run dataset generation end-to-end on the trained SAC checkpoint.
+- Run LoRA SFT on Colab; evaluate the fine-tuned SLM against zero-shot SLM and SAC.
+- After SFT lands: layer GRPO online RL on top — KL penalty against frozen base,
+  multiple candidate generations per observation, reference policy = SFT-warmed SLM.
+- Validation gate: single-agent SLM ≥70 % of SAC expert performance before Phase 4.
 
 ### Phase 4 — Multi-agent deployment (not started)
 
@@ -196,16 +219,19 @@ reward, partial obs split, Action-Only coordination.
 
 ## 6. Open items / next session
 
-1. **Refactor notebooks 02 & 03** to import from `src/agent`, `src/providers`,
-   `src/rollout` instead of inlining. Notebooks should stay thin.
+1. **Run the SAC→SLM distillation pipeline end-to-end.** Generate the JSONL dataset
+   from a trained SAC rollout (nb 04), then run LoRA SFT on Colab (nb 05), then
+   evaluate the fine-tuned SLM in CityLearn.
 2. **Run full SAC on Colab.** 300 episodes × 5 seeds, log to wandb. This is the
-   Phase-1 expert benchmark.
-3. **Land the headline comparison table:** No-Op / Random / RBC / SAC / LLM (×4
-   providers) / SLM, on both the canonical 168- and 300-step windows.
+   Phase-1 expert benchmark and the source of the distillation dataset.
+3. **Land the headline comparison table:** No-Op / Random / RBC / SAC / LLM (×5
+   providers) / zero-shot SLM / SFT-SLM, on both the canonical 168- and 300-step
+   windows.
 4. **Generalisation gap experiment.** Train/eval on disjoint building subsets and on
    unseen weather slices.
-5. **Begin Phase 3 design doc.** GRPO setup, KL coefficient, candidate count, reward
-   shaping. Lock the Phase-3 → Phase-4 validation gate (≥70% of SAC).
+5. **Phase 3 design doc — GRPO layer.** Build on the SFT-warmed SLM: KL coefficient,
+   candidate count, reward shaping. Lock the Phase-3 → Phase-4 validation gate
+   (≥70 % of SAC).
 
 ---
 
