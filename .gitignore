@@ -13,7 +13,12 @@ checkpoints/
 models/
 
 # === Notebook artifacts (rollouts, SAC checkpoints, generated datasets) ===
-notebooks/artifacts/
+# Exclude contents (not the dir itself) so negation can re-include subpaths.
+notebooks/artifacts/*
+# Exception: track SFT distillation datasets — small (~6 MB) and needed by Colab nb05
+!notebooks/artifacts/sft_datasets
+notebooks/artifacts/sft_datasets/*
+!notebooks/artifacts/sft_datasets/*.jsonl
 
 # === Experiment outputs ===
 results/raw_data/
