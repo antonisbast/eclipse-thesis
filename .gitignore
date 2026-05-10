@@ -8,8 +8,12 @@ sandbox/
 *.safetensors
 *.bin
 *.gguf
+*.pkl
 checkpoints/
 models/
+
+# === Notebook artifacts (rollouts, SAC checkpoints, generated datasets) ===
+notebooks/artifacts/
 
 # === Experiment outputs ===
 results/raw_data/
