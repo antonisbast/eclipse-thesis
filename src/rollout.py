@@ -1,9 +1,14 @@
 """Rollout drivers and result-summary helpers shared by notebooks 02 and 03.
 
-`run_policy`            — single-agent rollout (policy sees all 6 buildings).
-`run_policy_dual_agent` — dual-agent rollout with partial observability;
-                          two policy calls per step (α + β), actions merged
-                          back in global building-index order.
+`run_policy`            — single-agent rollout. THIS IS THE DEFAULT through
+                          Phase 3. The policy sees all buildings of the env
+                          (TRAINING_BUILDINGS=[0,1,2] for SLM training/eval;
+                          BUILDINGS=[0..5] when used on the full district).
+`run_policy_dual_agent` — PHASE 4 ONLY. Dual-agent rollout with partial
+                          observability: two policy calls per step (α + β),
+                          actions merged in global building-index order.
+                          Do NOT use for Phases 1–3 — single-agent
+                          group-centralized over 3 buildings is the design.
 
 Summary helpers return DataFrames / Series suitable for direct `display()`:
 `summarize_district`, `district_kpis`, `per_agent_summary`.
@@ -113,6 +118,12 @@ def run_policy_dual_agent(
     env_factory: Callable | None = None,
 ) -> dict:
     """Dual-agent rollout — partial observability, no inter-agent communication.
+
+    **PHASE 4 ONLY.** Through Phase 3 we train a single group-centralized agent
+    over TRAINING_BUILDINGS=[0,1,2] (one policy call per step). At Phase 4
+    deployment, the same fine-tuned LoRA is loaded into two agent instances
+    and this function is used to roll them out on the full 6-building env
+    with partial observability enforced by the snap slicing below.
 
     Agent α receives `snap[agent_a_bldgs]`, Agent β receives `snap[agent_b_bldgs]`.
     Their actions are combined in global building-index order before `env.step`.
@@ -236,19 +247,8 @@ def summarize_district(df: pd.DataFrame, label: str, n_buildings: int = N_BUILDI
     }
 
 
-def district_kpis(env_obj) -> pd.Series:
-    """Extract district-level KPIs from `env.evaluate()` regardless of CityLearn version."""
-    df = env_obj.evaluate()
-    if "level" in df.columns:
-        mask = df["level"].astype(str).str.lower() == "district"
-    elif "name" in df.columns:
-        mask = df["name"].astype(str).str.lower() == "district"
-    else:
-        mask = pd.Series(True, index=df.index)
-    d = df[mask]
-    if d.empty:
-        d = df.groupby("cost_function", as_index=False)["value"].mean()
-    return d.set_index("cost_function")["value"].astype(float)
+# district_kpis was here — removed. Use src.eval.district_kpis (evaluate_v2,
+# CityLearn 2.6+) for the single canonical KPI extractor.
 
 
 def per_agent_summary(df: pd.DataFrame, agent_name: str, bldg_indices: list[int]) -> dict:

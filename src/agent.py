@@ -84,16 +84,9 @@ def render_state(snap: list[dict]) -> str:
         f"carbon={crb:.3f} ({carbon_bucket(crb)})"
     )
 
-    fp1 = d0.get("electricity_pricing_predicted_1", None)
-    fp2 = d0.get("electricity_pricing_predicted_2", None)
-    fi1 = d0.get("solar_irradiance_predicted_1", None)
-    forecast = (
-        f"Forecast:  price+6h={price_bucket(fp1)}  "
-        f"price+12h={price_bucket(fp2)}  "
-        f"solar+6h={irradiance_bucket(fi1)}"
-    )
-
-    lines = [header, forecast, "Buildings:"]
+    # Forecast fields are intentionally omitted — see note in src/env.py.
+    # The agent must anticipate future price/solar from real-time state alone.
+    lines = [header, "Buildings:"]
     for i, d in enumerate(snap):
         soc  = d.get("electrical_storage_soc", 0.0)
         sol  = d.get("solar_generation", 0.0)
@@ -161,7 +154,7 @@ CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISC
 - 'SoC': Battery State of Charge (0% = empty, 100% = full).
 - Charging stores energy. Doing so when solar is HIGH or price is LOW is efficient, but charging from the grid increases district demand.
 - Discharging uses stored energy to serve the 'load', directly reducing grid dependency. This is highly beneficial when 'price' is PEAK or 'load' is high and SoC is sufficient.
-- Forecast fields show anticipated conditions 6 or 12 hours ahead, helping you plan when to store or release energy.
+- No forecasts are provided. Plan ahead by predicting how price, solar, and load are likely to evolve over the coming hours from the current hour, day_type, and present trends — and let that prediction shape whether you charge now or hold capacity for later.
 -Avoid aggresive actions, prefer CHARGE_20,CHARGE_40,DISCHARGE_20 OR DISCHARGE_40.
 -Never charge when SOC is higher than 90% and never discharge when SOC is lower than 10%.
 

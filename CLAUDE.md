@@ -27,6 +27,8 @@ Student: Antonios Bastoulis
 
 **In progress — Phase 2→3 transition: SAC→SLM behavior-cloning distillation.** Notebook 04 (`04_sac_distill_dataset.ipynb`) generates `(state_text, action_token)` JSONL from a trained SAC rollout; notebook 05 (`05_sft_gemma_colab.ipynb`) runs LoRA SFT on Gemma in Colab via Unsloth. Pipeline helpers live in `src/sft.py`. **Experiments not yet completed** — dataset generation and fine-tuning runs still pending.
 
+**Design decision (2026-05-12):** Phases 1–3 train a SINGLE group-centralized agent over 3 buildings (`TRAINING_BUILDINGS=[0,1,2]`), not the dual-agent setup of nb 02/03. One SLM call per step during SFT/RL. Phase 4 deployment still uses two agents — the same fine-tuned LoRA loads into both (α on B0–2, β on B3–5) without retraining. SAC teacher remains trained on the full 6-building district (`central_agent=False`, per-building policies); nb 04 slices the rollout into two 3-building rows per env step (`[0,1,2]` and `[3,4,5]`) for 2× SFT data and building-agnosticism within the 3-bldg shape. See `docs/PROGRESS.md` 2026-05-12 entry for full rationale.
+
 ## Four-phase plan
 
 | Phase | Goal | Compute |
@@ -140,9 +142,11 @@ eclipse-thesis/
 
 ## Key constraints
 
+- **Single agent through Phase 3** (group-centralized over `TRAINING_BUILDINGS=[0,1,2]`); dual-agent setup is Phase 4 only. Same LoRA loads into both Phase 4 agents — no retraining.
 - Joint reward: both agents must receive the SAME reward at each timestep (Phase 4)
-- Partial observability: Agent α sees buildings {1,2,3}, Agent β sees {4,5,6} — never crossed (Phase 4)
+- Partial observability: Agent α sees buildings {0,1,2}, Agent β sees {3,4,5} — never crossed (Phase 4)
 - Action-Only condition: NO explicit communication channel between agents (Phase 4)
+- `central_agent=False` everywhere (Phases 1–4) — the flag controls env I/O shape, not policy count. Joint reward at Phase 4 is computed in the rollout loop by summing the per-building reward list.
 - Online RL updates LoRA weights only; base SLM weights stay frozen (Phase 3+)
 - KL penalty against reference model required to prevent catastrophic forgetting (Phase 3+)
 - Validation gate before Phase 4: single-agent SLM must reach ≥70% of SAC expert performance

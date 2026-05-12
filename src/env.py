@@ -25,17 +25,39 @@ SCHEMA_FILE   = DATASET_ROOT / "schema.json"
 SEED: int = 42
 
 # ── Buildings ─────────────────────────────────────────────────────────────
-BUILDINGS:        list[int] = [0, 1, 2, 3, 4, 5]
-UNSEEN_BUILDINGS: list[int] = [6, 7, 8, 9, 10, 11]
+# Phases 1–3 train a SINGLE group-centralized agent over 3 buildings (one SLM
+# call per step, not two). Phase 4 splits the canonical 6-building district
+# across two agents (α=TRAINING_BUILDINGS, β=HELDOUT_BUILDINGS) for the
+# partial-observability + no-comms multi-agent experiment.
+#
+#   TRAINING_BUILDINGS — single-agent training/eval through Phase 3
+#   HELDOUT_BUILDINGS  — in-distribution generalization test (unseen buildings,
+#                        same dataset) AND Phase 4 agent β's slice
+#   BUILDINGS          — full district (Phase 4 deployment, dual-agent rollout)
+#   UNSEEN_BUILDINGS   — out-of-distribution generalization test (different
+#                        buildings from the same 2022 dataset)
+TRAINING_BUILDINGS: list[int] = [0, 1, 2]
+HELDOUT_BUILDINGS:  list[int] = [3, 4, 5]
+BUILDINGS:          list[int] = [0, 1, 2, 3, 4, 5]
+UNSEEN_BUILDINGS:   list[int] = [6, 7, 8, 9, 10, 11]
 
 # ── Episode bounds ────────────────────────────────────────────────────────
 SIM_START: int = 0
 SIM_END:   int = 8759   # full year (8 760 hourly steps, indices 0–8759)
 
 # ── Observation sets ──────────────────────────────────────────────────────
-# OBSERVATIONS_SAC: 13 variables — 9 real-time + 4 short-horizon forecasts.
-#   Used for SAC training. Forecasts follow Nweye et al. (2024, MERLIN).
-OBSERVATIONS_SAC: list[str] = [
+# NOTE: CityLearn exposes oracle short-horizon forecasts (price/solar +6 h, +12 h)
+# in the raw dataset. We deliberately DO NOT use them — they are perfect look-ahead
+# values from the simulation tape, not signals an agent could realistically obtain
+# in deployment. Including them would let the policy "cheat" against the test
+# distribution and inflate KPIs. The agent must reason about future conditions
+# from real-time state alone (time of day, calendar, current price/solar trend).
+#
+# Canonical 9 real-time variables — used by SAC (vector input) and the LLM
+# (which actually reads state via snapshot_state(), but the env still needs an
+# active_observations list to construct the obs vector). Forecast fields are
+# deliberately excluded; see the note above.
+OBSERVATIONS: list[str] = [
     "month", "hour", "day_type",
     "electrical_storage_soc",
     "net_electricity_consumption",
@@ -43,24 +65,12 @@ OBSERVATIONS_SAC: list[str] = [
     "solar_generation",
     "electricity_pricing",
     "carbon_intensity",
-    "electricity_pricing_predicted_1",       # price  +6 h
-    "electricity_pricing_predicted_2",       # price  +12 h
-    "diffuse_solar_irradiance_predicted_1",  # solar  +6 h (diffuse)
-    "direct_solar_irradiance_predicted_1",   # solar  +6 h (direct)
 ]
 
-# OBSERVATIONS_LLM: 9 real-time variables — no forecasts.
-#   Used for LLM-as-policy. The LLM receives state via snapshot_state(),
-#   not the obs vector, so forecast columns in the vector are unused noise.
-OBSERVATIONS_LLM: list[str] = [
-    "month", "hour", "day_type",
-    "electrical_storage_soc",
-    "net_electricity_consumption",
-    "non_shiftable_load",
-    "solar_generation",
-    "electricity_pricing",
-    "carbon_intensity",
-]
+# Legacy aliases — older notebook code referenced obs_set="sac" / "llm".
+# Both resolve to the same list now.
+OBSERVATIONS_SAC: list[str] = OBSERVATIONS
+OBSERVATIONS_LLM: list[str] = OBSERVATIONS
 
 ACTIVE_ACTIONS: list[str] = ["electrical_storage"]
 
@@ -163,11 +173,16 @@ def make_env(
     """Build a CityLearnEnv with the canonical thesis configuration.
 
     Args:
-        buildings:     Building indices to include. Defaults to BUILDINGS (0–5).
+        buildings:     Building indices to include. Defaults to BUILDINGS (0–5)
+                       for backward compatibility with Phase 1/2 notebooks. For
+                       Phase 3 single-agent SLM work, pass
+                       `buildings=TRAINING_BUILDINGS` ([0,1,2]) explicitly.
         start:         Simulation start timestep. Default 0 (full year).
         end:           Simulation end timestep. Default 8758 (full year).
         reward_fn:     'merlin' (default, dataset-agnostic) or 'eco' (multi-objective).
-        obs_set:       'sac' → 13 variables (with forecasts); 'llm' → 9 real-time only.
+        obs_set:       'sac' or 'llm' — both are the same 9 real-time variables
+                       (oracle forecast fields are intentionally excluded; see
+                       the note on OBSERVATIONS_SAC).
         session_name:  Enables render output when provided.
         render_mode:   'end' (buffer per episode) or 'during' (live writes).
         artifacts_dir: Base directory for render output. Defaults to notebooks/artifacts/.
@@ -214,7 +229,9 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
     and net_electricity_consumption report stale (next-step initialisation)
     values. Always safe to call right after env.reset() or env.step().
 
-    Forecast fields included
+    NOTE: We deliberately exclude the oracle price/solar forecast fields that
+    CityLearn exposes — see the comment on OBSERVATIONS_SAC. The agent must
+    plan from real-time state only.
     """
     out = []
 
@@ -228,23 +245,8 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
         # shorter than energy_simulation.* (e.g. non_shiftable_load is
         # populated up to t-1), so we clamp per-array via _at().
         t = env.time_step
-        # ── Forecast helpers ──────────────────────────────────────────────
-        def _price_fc(attr: str) -> float | None:
-            try:
-                return float(_at(getattr(b.pricing, attr), t))
-            except Exception:
-                return None
-
-        def _irr_sum_fc(attr_diffuse: str, attr_direct: str) -> float | None:
-            try:
-                diffuse = float(_at(getattr(b.weather, attr_diffuse), t))
-                direct  = float(_at(getattr(b.weather, attr_direct), t))
-                return diffuse + direct
-            except Exception:
-                return None
 
         out.append({
-            # ── Real-time signals ─────────────────────────────────────────
             "month":                            int(_at(b.energy_simulation.month, t)),
             "day_type":                         int(_at(b.energy_simulation.day_type, t)),
             "hour":                             int(_at(b.energy_simulation.hour, t)),
@@ -254,12 +256,5 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
             "non_shiftable_load":               float(_at(b.non_shiftable_load, t)),
             "electrical_storage_soc":           float(_at(b.electrical_storage.soc, t - 1)) if t > 0 else float(b.electrical_storage.soc[0]),
             "net_electricity_consumption_last": float(_at(b.net_electricity_consumption, t - 1)) if t > 0 else 0.0,
-            # ── Short-horizon forecasts ───────────────────────────────────
-            "electricity_pricing_predicted_1":  _price_fc("electricity_pricing_predicted_1"),
-            "electricity_pricing_predicted_2":  _price_fc("electricity_pricing_predicted_2"),
-            "solar_irradiance_predicted_1":     _irr_sum_fc(
-                "_diffuse_solar_irradiance_predicted_1",
-                "_direct_solar_irradiance_predicted_1",
-            ),
         })
     return out

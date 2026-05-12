@@ -30,80 +30,25 @@ from typing import Any, Iterable
 
 import numpy as np
 
-# ── Bucket thresholds (kept in sync with notebook 03) ─────────────────────
+# ── Single source of truth lives in src.agent ─────────────────────────────
+# State rendering, buckets, thresholds, and the inference-time action regex
+# are defined ONCE in src/agent.py. We re-export them here so nb 04/05
+# can do `from src.sft import render_state, parse_actions, ...` without
+# pulling src.agent explicitly. _ACTION_RE alias kept for older callers.
+from src.agent import (
+    PRICE_PEAK_THRESHOLD,
+    IRRADIANCE_LOW_THRESHOLD,
+    IRRADIANCE_HIGH_THRESHOLD,
+    price_bucket,
+    carbon_bucket,
+    solar_bucket,
+    irradiance_bucket,
+    render_state,
+    parse_actions,
+    ACTION_RE,
+)
 
-PRICE_PEAK_THRESHOLD      = 0.30
-IRRADIANCE_LOW_THRESHOLD  = 50
-IRRADIANCE_HIGH_THRESHOLD = 600
-
-
-def price_bucket(v: float | None) -> str:
-    if v is None: return "?"
-    return "PEAK" if v >= PRICE_PEAK_THRESHOLD else "LOW"
-
-def carbon_bucket(v: float | None) -> str:
-    if v is None: return "?"
-    if v < 0.12: return "LOW"
-    if v < 0.25: return "MID"
-    return "HIGH"
-
-def solar_bucket(v: float | None) -> str:
-    if v is None: return "?"
-    if v <= 0.0:  return "NONE"
-    if v < 0.5:   return "LOW"
-    return "HIGH"
-
-def irradiance_bucket(v: float | None) -> str:
-    if v is None: return "?"
-    if v < IRRADIANCE_LOW_THRESHOLD:  return "NONE"
-    if v < IRRADIANCE_HIGH_THRESHOLD: return "LOW"
-    return "HIGH"
-
-
-# ── State text rendering ──────────────────────────────────────────────────
-
-def render_state(snap: list[dict]) -> str:
-    """Format a snapshot (list of building dicts from `snapshot_state`) as
-    the LLM-facing prompt body. Mirrors notebook 03's `render_state`.
-    """
-    if not snap:
-        return "(empty snapshot)"
-    d0 = snap[0]
-    hour = int(d0.get("hour", 1)) - 1
-    day  = int(d0.get("day_type", 1)) - 1
-    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-    prc = d0.get("electricity_pricing", None)
-    crb = d0.get("carbon_intensity", None)
-
-    header = (
-        f"Month {d0.get('month', '?')}, {day_names[day]} {hour:02d}:00  |  "
-        f"price={prc:.3f} ({price_bucket(prc)})  |  "
-        f"carbon={crb:.3f} ({carbon_bucket(crb)})"
-    )
-
-    fp1 = d0.get("electricity_pricing_predicted_1", None)
-    fp2 = d0.get("electricity_pricing_predicted_2", None)
-    fi1 = d0.get("solar_irradiance_predicted_1", None)
-    forecast = (
-        f"Forecast:  price+6h={price_bucket(fp1)}  "
-        f"price+12h={price_bucket(fp2)}  "
-        f"solar+6h={irradiance_bucket(fi1)}"
-    )
-
-    lines = [header, forecast, "Buildings:"]
-    for i, d in enumerate(snap):
-        soc  = d.get("electrical_storage_soc", 0.0)
-        sol  = d.get("solar_generation", 0.0)
-        load = d.get("non_shiftable_load", 0.0)
-        net  = d.get("net_electricity_consumption_last", 0.0)
-        lines.append(
-            f"  B{i}: SoC={soc*100:5.1f}%  "
-            f"load={load:.2f} kWh  "
-            f"last_net={net:+.2f} kWh  "
-            f"solar={solar_bucket(sol)}"
-        )
-    return "\n".join(lines)
+_ACTION_RE = ACTION_RE   # legacy alias — keep for any external import
 
 
 # ── Action discretisation (SAC float ↔ prompt token) ──────────────────────
@@ -128,30 +73,6 @@ def action_to_token(a: float, idle_threshold: float = IDLE_THRESHOLD) -> str:
     return f"{direction}_{pct}"
 
 
-_ACTION_RE = re.compile(
-    r"<action\s+building\s*=\s*(\d+)\s*>\s*(CHARGE|DISCHARGE|IDLE)_?(\d+)?\s*</action>",
-    re.IGNORECASE,
-)
-
-
-def parse_actions(text: str, n_buildings: int) -> list[float]:
-    """Inverse of `action_to_token` — extracts per-building actions from
-    LLM output. Missing buildings default to 0.0 (no-op)."""
-    acts = [0.0] * n_buildings
-    for m in _ACTION_RE.finditer(text):
-        idx       = int(m.group(1))
-        direction = m.group(2).upper()
-        amt_str   = m.group(3)
-        val = 0.0
-        if direction == "CHARGE" and amt_str:
-            val = float(amt_str) / 100.0
-        elif direction == "DISCHARGE" and amt_str:
-            val = -float(amt_str) / 100.0
-        if 0 <= idx < n_buildings:
-            acts[idx] = float(np.clip(val, -1.0, 1.0))
-    return acts
-
-
 def format_action_block(actions: Iterable[float], n_buildings: int) -> str:
     """Format a list of float actions as the assistant response body."""
     tokens = [action_to_token(a) for a in list(actions)[:n_buildings]]
@@ -165,13 +86,20 @@ def format_action_block(actions: Iterable[float], n_buildings: int) -> str:
 
 # ── Prompts ───────────────────────────────────────────────────────────────
 
-def make_sft_prompt(n_buildings: int = 6) -> str:
-    """SFT/eval prompt. Mirrors nb03's `make_minimal_prompt` but WITHOUT the
-    [Reasoning] / <thought> block, since the SAC teacher provides no rationale.
+def make_sft_prompt(n_buildings: int = 3) -> str:
+    """SFT-only prompt — the [Reasoning] / <thought> block of the canonical
+    CoT prompt (`src.agent.make_minimal_prompt`) is intentionally STRIPPED
+    here, because the SAC teacher trajectories in the distillation JSONL
+    don't include rationales.
 
-    The SAME text is used at training and at inference — any drift between the
-    two creates an OOD evaluation and destroys KPIs (see the CoT eval blowup
-    in nb05 § 19).
+    For everything else (zero-shot LLM-as-policy in nb 02/03, eval of the
+    fine-tuned SLM, Phase 4 deployment) use `src.agent.make_minimal_prompt`
+    which keeps CoT — that is the canonical prompt.
+
+    CRITICAL: at eval time of the fine-tuned SLM, use the SAME prompt that
+    was used at SFT — i.e. THIS function — to avoid an OOD eval (see the
+    CoT eval blowup in nb 05 § 19). If you want a CoT-capable fine-tuned
+    SLM you must re-distill with synthesised <thought> blocks.
     """
     action_fmt = "\n".join(
         f"<action building={i}>YOUR_CHOICE</action>" for i in range(n_buildings)
@@ -189,7 +117,7 @@ CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISC
 - 'SoC': Battery State of Charge (0% = empty, 100% = full).
 - Charging stores energy. Doing so when solar is HIGH or price is LOW is efficient, but charging from the grid increases district demand.
 - Discharging uses stored energy to serve the 'load', directly reducing grid dependency. This is highly beneficial when 'price' is PEAK or 'load' is high and SoC is sufficient.
-- Forecast fields show anticipated conditions 6 or 12 hours ahead, helping you plan when to store or release energy.
+- No forecasts are provided. Plan ahead by predicting how price, solar, and load are likely to evolve over the coming hours from the current hour, day_type, and present trends — and let that prediction shape whether you charge now or hold capacity for later.
 - Avoid aggressive actions, prefer CHARGE_20, CHARGE_40, DISCHARGE_20 or DISCHARGE_40.
 - Never charge when SoC is higher than 90% and never discharge when SoC is lower than 10%.
 
@@ -256,59 +184,105 @@ def dump_sac_trajectory_jsonl(
     snapshot_fn,
     n_buildings: int | None = None,
     include_meta: bool = True,
+    building_slices: list[list[int]] | None = None,
 ) -> dict[str, Any]:
     """Run SAC deterministically for one full episode and write a JSONL
     SFT dataset.
 
-    Each line is:
+    Each JSONL line is:
         {"prompt": "STATE:\\n...", "response": "<action ...>\\n...",
-         "t": int, "actions_float": [..], "reward": [..]}
+         "t": int, "actions_float": [..], "reward": [..], "slice": [...]}
 
     Args:
-        env:          A fresh CityLearnEnv (will be reset).
-        agent:        Trained SAC agent with .predict(obs, deterministic=True).
-        out_path:     Destination .jsonl path.
-        snapshot_fn:  Callable env -> list[dict] (typically `snapshot_state`).
-        n_buildings:  Override; defaults to len(env.buildings).
-        include_meta: Include t, actions_float, reward fields per row.
+        env:             A fresh CityLearnEnv (will be reset). The SAC teacher
+                         is rolled out on ALL its buildings (full 6-building
+                         env for the canonical thesis setup) — see
+                         `building_slices` for emitting only a subset per row.
+        agent:           Trained SAC agent with .predict(obs, deterministic=True).
+        out_path:        Destination .jsonl path.
+        snapshot_fn:     Callable env -> list[dict] (typically `snapshot_state`).
+        n_buildings:     Number of buildings PER OUTPUT ROW. Defaults to the
+                         slice width if `building_slices` is given, else
+                         `len(env.buildings)`.
+        include_meta:    Include t, actions_float, reward, slice fields per row.
+        building_slices: Optional list of index-lists. For each env step, one
+                         row is emitted per slice — the state_text and action
+                         block are restricted to that subset of buildings.
+                         The SAC teacher still acts on the full env; only the
+                         OUTPUT is sliced. Example for the Phase-3 single-agent
+                         setup on a 6-building SAC:
+                             building_slices=[[0,1,2], [3,4,5]]
+                         doubles the dataset and makes the SLM building-agnostic
+                         within the 3-building shape, so the same LoRA can drop
+                         into Phase 4 agent α (B0–2) or β (B3–5).
+                         If None, emits one row per step over all env buildings
+                         (legacy behaviour).
 
     Returns:
-        Stats dict: {"n_steps", "path", "fallbacks", "n_buildings"}.
+        Stats dict: {"n_steps", "n_rows", "path", "n_buildings"}.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    n_b = n_buildings if n_buildings is not None else len(env.buildings)
+    n_env = len(env.buildings)
+    if building_slices is None:
+        slices = [list(range(n_env))]
+    else:
+        slices = [list(s) for s in building_slices]
+        widths = {len(s) for s in slices}
+        if len(widths) != 1:
+            raise ValueError(
+                f"All building_slices must have the same width; got widths={widths}"
+            )
+
+    slice_width = len(slices[0])
+    n_b = n_buildings if n_buildings is not None else slice_width
+    if n_b != slice_width:
+        raise ValueError(
+            f"n_buildings={n_b} must equal slice width ({slice_width}); "
+            f"pass building_slices with the desired per-row width instead."
+        )
+
     obs, _ = env.reset()
     done, t = False, 0
-    n_written = 0
+    n_steps = 0
+    n_rows  = 0
 
     with open(out_path, "w") as f:
         while not done:
             snap        = snapshot_fn(env)
-            state_text  = render_state(snap)
             actions     = agent.predict(obs, deterministic=True)  # list-of-list
             # Flatten: SAC returns one [a] per building (active_actions=1)
             acts_flat   = [float(a[0]) if hasattr(a, "__len__") else float(a)
                            for a in actions]
-            response    = format_action_block(acts_flat, n_b)
-            row         = {
-                "prompt":   f"STATE:\n{state_text}",
-                "response": response,
-            }
-            if include_meta:
-                row["t"]              = t
-                row["actions_float"]  = acts_flat
             obs, reward, terminated, truncated, _ = env.step(actions)
-            if include_meta:
-                row["reward"] = [float(r) for r in reward]
-            f.write(json.dumps(row) + "\n")
-            n_written += 1
+            reward_flat = [float(r) for r in reward]
+
+            for sl in slices:
+                snap_sl  = [snap[i] for i in sl]
+                acts_sl  = [acts_flat[i] for i in sl]
+                state_text = render_state(snap_sl)
+                response   = format_action_block(acts_sl, n_b)
+                row = {
+                    "prompt":   f"STATE:\n{state_text}",
+                    "response": response,
+                }
+                if include_meta:
+                    row["t"]             = t
+                    row["slice"]         = sl
+                    row["actions_float"] = acts_sl
+                    row["reward"]        = [reward_flat[i] for i in sl]
+                f.write(json.dumps(row) + "\n")
+                n_rows += 1
+
+            n_steps += 1
             done = bool(terminated or truncated)
             t   += 1
 
     return {
-        "n_steps":     n_written,
+        "n_steps":     n_steps,
+        "n_rows":      n_rows,
         "path":        str(out_path),
         "n_buildings": n_b,
+        "n_slices":    len(slices),
     }

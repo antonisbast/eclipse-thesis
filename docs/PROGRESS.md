@@ -21,6 +21,66 @@
 
 ## Log
 
+### 2026-05-12 — src/ + notebook consistency pass: single source of truth [LOCAL]
+- **Goal:** notebooks define things analytically once (nb 01) and import from `src/` thereafter. No silent duplication.
+- **`src/` deduplication:**
+  - `src/sft.py` now re-exports `render_state`, bucket fns, thresholds, `parse_actions`, `ACTION_RE` from `src.agent` (was full inline duplicate). `_ACTION_RE` kept as legacy alias. Single source of truth for state rendering + action parsing.
+  - `district_kpis` removed from `src/rollout.py` — the only canonical one is `src.eval.district_kpis` (evaluate_v2 based, CityLearn 2.6+).
+  - `OBSERVATIONS_LLM` and `OBSERVATIONS_SAC` collapsed into one `OBSERVATIONS` constant in `src/env.py`. Old names kept as aliases for back-compat.
+- **Notebooks slimmed (~25 KB inline code removed):**
+  - **nb 02** (`02_llm_policy`) — dropped ~14 KB inline cell (buckets, render_state, parse_actions, make_minimal_prompt, APIProvider, make_policy_llm, reference policies). All imports from `src.agent`, `src.providers`, `src.eval`.
+  - **nb 03** (`03_slm_colab`) — same pattern; dropped ~17 KB (incl. inline `LocalHFProvider`, ~6 KB). `make_colab_env` kept for Colab schema auto-download.
+  - **nb 05** — dropped inline `make_minimal_prompt`; CoT prompt now imported from `src.agent` for OOD comparison eval (§ 19). Renamed local `_ACTION_RE` → `_ACTION_TAG_RE` to disambiguate from the canonical `src.agent.ACTION_RE` (opening-tag check vs full parser).
+  - **nb 06** — same `_ACTION_TAG_RE` rename; `OBSERVATIONS_LLM` → `OBSERVATIONS`.
+- **Prompt policy:** `src.agent.make_minimal_prompt` is the **canonical CoT prompt** (with `<thought>` block). `src.sft.make_sft_prompt` is the **SFT-only no-CoT variant** because the SAC-distilled JSONL has no rationales. Both docstrings updated. Cross-prompt drift caused the nb05 CoT eval blowup — never apply make_minimal_prompt to an SLM fine-tuned on make_sft_prompt without re-distilling with synthesised thoughts.
+- **Eval everywhere:** every notebook except 01 imports `from src.eval import evaluate, comparison_table` and uses `evaluate_v2()` under the hood (CityLearn 2.6+). nb 05/06 v1 deleted; v2 → canonical.
+- **Verification:** `render_state`, `parse_actions`, `ACTION_RE` are the *same Python objects* across `src.agent` and `src.sft` (`is` check passes). `OBSERVATIONS_*` aliases all resolve to the same list.
+- **Remaining "redefs" are intentional thin wrappers:** nb 01's `challenge_score`/`zne_metric` (pedagogical analytical defs); nb 02/03 `summarize_district(df, label)` (binds `n_buildings=N_BLDGS`, calls `src.rollout.summarize_district`); nb 02/03 `run_policy` (binds `env_factory`); nb 06 `make_env` (Colab schema-by-name).
+
+### 2026-05-12 — Single-agent design decision: Phase 3 trains ONE SLM on 3 buildings [LOCAL]
+- **Decision (after supervisor discussion):** until Phase 4, all SLM training and
+  evaluation uses a SINGLE group-centralized agent over 3 buildings, not the
+  dual-agent setup of nb 02/03. One inference call per step instead of two
+  during Phase 3 SFT + RL. Phase 4 deployment still uses two agents; the same
+  trained LoRA loads into both — no retraining.
+- **Building split:**
+  - `TRAINING_BUILDINGS = [0, 1, 2]` — Phase 3 train + in-distribution eval; also Phase 4 agent α
+  - `HELDOUT_BUILDINGS  = [3, 4, 5]` — unseen-buildings generalization test (RQ2); also Phase 4 agent β
+  - `BUILDINGS = [0..5]` — full district, Phase 4 dual-agent rollout
+  - `UNSEEN_BUILDINGS = [6..11]` — OOD generalization (different buildings, same 2022 dataset)
+- **SAC teacher retraining: NOT NEEDED.** SAC was trained `central_agent=False`
+  (per-building policies, independent) → slicing rollouts to {0,1,2} or {3,4,5}
+  is distribution-clean. We dump the existing 6-building SAC's trajectory and
+  emit two 3-building rows per env step ({0,1,2} + {3,4,5}) → 2× SFT data, and
+  the SLM becomes building-agnostic within the 3-building shape.
+- **Why group-centralized over 3 instead of fully decentralized 1/bldg:**
+  intra-group coordination is the SLM's strength (multi-building context in
+  one prompt), inference cost is 1 call/step not 3, and this matches the
+  Phase 4 research question (implicit coordination *across* the group boundary
+  with no comms, while each agent coordinates *within* its group).
+- **Env config:** `central_agent=False` everywhere (Phase 3 and Phase 4) — the
+  flag controls env I/O shape, not policy count. Joint reward at Phase 4 is
+  computed in the rollout loop by summing the per-building reward list.
+- **Code changes (this commit):**
+  - `src/env.py` — added `TRAINING_BUILDINGS`, `HELDOUT_BUILDINGS` constants;
+    documented building-set conventions; `make_env` default unchanged (still
+    `BUILDINGS`) — new code opts in explicitly via `buildings=TRAINING_BUILDINGS`.
+  - `src/rollout.py` — `run_policy_dual_agent` docstring updated: PHASE 4 ONLY.
+    `run_policy` (single-agent) is the default through Phase 3. No behavior changes.
+  - `src/sft.py` — `dump_sac_trajectory_jsonl` gained `building_slices` arg
+    (list of index-lists); SAC still acts on the full env, but JSONL output is
+    sliced per row. New rows include a `slice` field. `make_sft_prompt` default
+    changed from 6 → 3 buildings.
+  - `notebooks/04_sac_distill_dataset.ipynb` — SAC still trains/evaluates on
+    6 buildings; dump cell now passes `building_slices=[TRAINING_BUILDINGS,
+    HELDOUT_BUILDINGS]` → JSONL has 2× rows, each with 3 buildings. Prompt
+    template display switched to `make_sft_prompt(3)`. Sanity cell shows one
+    row from each slice.
+- **Notebooks 01/02/03 (Phase 1/2 zero-shot) left as-is** — they are complete
+  experiments. Any rerun would need to pass `buildings=BUILDINGS` explicitly
+  (still the `make_env` default, so they work unchanged).
+- **Next:** rerun nb 04 end-to-end → produce the 17,520-row JSONL → push for nb 05 SFT on Colab.
+
 ### 2026-05-10 — Phase 2→3 transition: SAC→SLM distillation pipeline scaffolded [LOCAL]
 - Confirmed Phase 1 + Phase 2 zero-shot are complete and stable: notebooks 01/02/03 work end-to-end; `src/` cleanly hosts env, agent, providers, rollout, eval.
 - New work-in-progress (commits `cca9eb11`, `c943a802`):
