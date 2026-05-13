@@ -21,6 +21,13 @@
 
 ## Log
 
+### 2026-05-13 — Colab CityLearn-version fixes + SAC distillation dataset pushed [LOCAL]
+- Aligned `WEEK_START = 3624` across nb 02 and nb 03 (nb 03 had 2624) so remote-API and local-SLM zero-shot results are on the same window for direct comparison.
+- Pinned CityLearn 2.6.0b2 in nb 03 and nb 05 install cells (both were resolving to 2.5, which only has the legacy `env.evaluate()` and crashed `src.eval` calls). All three Colab notebooks (03, 05, 06) now use the same install pattern: `CITYLEARN_VERSION = "2.6.0b2"` + `pip install --pre --no-deps` + `startswith("2.6")` assertion.
+- Ran nb 04 end-to-end on MacBook: SAC trained on 6-building district, full-year rollout dumped → **17,520 JSONL rows** (8,760 env steps × 2 slices: `[0,1,2]` and `[3,4,5]`), 10 MB, committed at `notebooks/artifacts/sft_datasets/sac_merlin_distill_20260512_212359.jsonl`. nb 05 on Colab picks up the newest matching file via its glob.
+- Committed nb 01–04 post-run outputs.
+- **Next:** run nb 05 SFT on Colab → adapter to Drive → nb 06 generalization eval → validation gate (≥70% of SAC Phase I) before any RL phase.
+
 ### 2026-05-12 — src/ + notebook consistency pass: single source of truth [LOCAL]
 - **Goal:** notebooks define things analytically once (nb 01) and import from `src/` thereafter. No silent duplication.
 - **`src/` deduplication:**
