@@ -142,36 +142,31 @@ def make_minimal_prompt(n_buildings: int = 6) -> str:
         f"<action building={i}>YOUR_CHOICE</action>" for i in range(n_buildings)
     )
     return f"""\
-You are an energy management agent for {n_buildings} buildings. Goal: minimize grid cost, carbon emissions, AND district peak/ramping by coordinating the buildings as a portfolio — not as identical copies.
+You manage batteries in {n_buildings} buildings that share one grid meter. Each step, pick one action per building.
 
-[Actions] — choose exactly one per building:
+[Actions]
 CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISCHARGE_40, DISCHARGE_60, DISCHARGE_80, DISCHARGE_100
 
-[State Variables & Environment]
-- 'price': Current cost of grid electricity. PEAK indicates high cost.
-- 'carbon': Grid carbon intensity (LOW/MID/HIGH). HIGH means imported electricity is dirty even if price is low — prefer IDLE over charging in that case.
-- 'solar': Renewable energy generated locally.
-- 'load': Energy demanded by the building's operations. High load means the building needs a lot of power.
-- 'SoC': Battery State of Charge (0% = empty, 100% = full).
-- Charging stores energy. Doing so when solar is HIGH or price is LOW AND carbon is not HIGH is efficient; charging from the grid increases district demand and may also import dirty power.
-- Discharging uses stored energy to serve the 'load', directly reducing grid dependency. This is highly beneficial when 'price' is PEAK or 'load' is high and SoC is sufficient.
-- No forecasts are provided. Plan ahead by predicting how price, solar, and load are likely to evolve from the current hour, day_type, and present trends.
-- Never charge when SoC > 90%; never discharge when SoC < 10%.
+[State]
+- 'price' (LOW / MID / PEAK): how expensive grid electricity is now.
+- 'carbon' (LOW / MID / HIGH): how dirty grid electricity is now.
+- 'solar' (NONE / LOW / MID / HIGH): the building's solar generation now.
+- 'load' (kWh): the building's electricity demand now.
+- 'SoC' (%): how full the battery is. 0% empty, 100% full.
+- 'last_net' (kWh): grid draw last step — your feedback signal.
+- Time: month, weekday, hour. No forecasts.
 
-[District coordination — CRITICAL for ramping & load factor]
-The {n_buildings} buildings share one grid connection. If they all charge or all discharge in the same step, the district net load spikes and ramping/peak KPIs collapse. Treat each step as a portfolio decision:
-- DIVERSIFY: in most steps the buildings should NOT all take the same action. Stagger by SoC (charge the lowest-SoC building harder, idle the highest) and by load (discharge the highest-load building harder).
-- SIZE TO NEED: discharge magnitude should roughly match that building's own (load − solar). Over-discharging exports power at near-zero value and worsens ramping; under-discharging wastes the peak-price opportunity. The same logic applies to charging — match the available solar surplus or the room left in the battery, do not blanket-charge every building the same amount.
-- AVOID SYNCHRONIZED SWINGS: if last step was a strong all-charge or all-discharge, soften this step to break the sawtooth.
+[Physics]
+A building's grid draw is its load, minus its solar, plus any charging, minus any discharging. A negative result means the building exports to the grid for almost no reward. The {n_buildings} buildings share one meter, so the district's draw is the sum across them. Battery charge stays between 0% and 100%.
 
-[Reasoning]
-Before choosing actions, analyze the state in a <thought> block.
-Keep it under 35 words, but it MUST mention how the buildings differ this step (which one charges hardest / which one idles / which one discharges hardest, and why) — never write a single global decision that applies to all of them.
+[Hints]
+- To keep cost down: discharge when grid electricity is expensive; charge when it is cheap or when solar can cover it.
+- To keep carbon low: avoid buying from the grid when it is dirty (HIGH carbon) — IDLE is better than charging in those moments.
+- To keep ramping low: prefer small actions (CHARGE_20/40, DISCHARGE_20/40), and avoid switching the same battery from charging to discharging on the very next step.
+- To keep peak low: discharge to help serve the load when district demand is high; do not charge from the grid then.
 
-[Output Format]
-<thought>
-Per-building reasoning here (under 35 words).
-</thought>
+[Output]
+<thought>brief reasoning about each building and the trade-offs, under 30 words</thought>
 {action_fmt}
 """
 

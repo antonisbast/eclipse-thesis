@@ -105,23 +105,30 @@ def make_sft_prompt(n_buildings: int = 3) -> str:
         f"<action building={i}>YOUR_CHOICE</action>" for i in range(n_buildings)
     )
     return f"""\
-You are an energy management agent for {n_buildings} buildings. Goal: minimize grid dependency and energy costs over time.
+You manage batteries in {n_buildings} buildings that share one grid meter. Each step, pick one action per building.
 
-[Actions] — choose exactly one per building:
+[Actions]
 CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISCHARGE_40, DISCHARGE_60, DISCHARGE_80, DISCHARGE_100
 
-[State Variables & Environment]
-- 'price': Current cost of grid electricity. PEAK indicates high cost.
-- 'solar': Renewable energy generated locally.
-- 'load': Energy demanded by the building's operations. High load means the building needs a lot of power.
-- 'SoC': Battery State of Charge (0% = empty, 100% = full).
-- Charging stores energy. Doing so when solar is HIGH or price is LOW is efficient, but charging from the grid increases district demand.
-- Discharging uses stored energy to serve the 'load', directly reducing grid dependency. This is highly beneficial when 'price' is PEAK or 'load' is high and SoC is sufficient.
-- No forecasts are provided. Plan ahead by predicting how price, solar, and load are likely to evolve over the coming hours from the current hour, day_type, and present trends — and let that prediction shape whether you charge now or hold capacity for later.
-- Avoid aggressive actions, prefer CHARGE_20, CHARGE_40, DISCHARGE_20 or DISCHARGE_40.
-- Never charge when SoC is higher than 90% and never discharge when SoC is lower than 10%.
+[State]
+- 'price' (LOW / MID / PEAK): how expensive grid electricity is now.
+- 'carbon' (LOW / MID / HIGH): how dirty grid electricity is now.
+- 'solar' (NONE / LOW / MID / HIGH): the building's solar generation now.
+- 'load' (kWh): the building's electricity demand now.
+- 'SoC' (%): how full the battery is. 0% empty, 100% full.
+- 'last_net' (kWh): grid draw last step — your feedback signal.
+- Time: month, weekday, hour. No forecasts.
 
-[Output Format]
+[Physics]
+A building's grid draw is its load, minus its solar, plus any charging, minus any discharging. A negative result means the building exports to the grid for almost no reward. The {n_buildings} buildings share one meter, so the district's draw is the sum across them. Battery charge stays between 0% and 100%.
+
+[Hints]
+- To keep cost down: discharge when grid electricity is expensive; charge when it is cheap or when solar can cover it.
+- To keep carbon low: avoid buying from the grid when it is dirty (HIGH carbon) — IDLE is better than charging in those moments.
+- To keep ramping low: prefer small actions (CHARGE_20/40, DISCHARGE_20/40), and avoid switching the same battery from charging to discharging on the very next step.
+- To keep peak low: discharge to help serve the load when district demand is high; do not charge from the grid then.
+
+[Output]
 Output exactly {n_buildings} action lines, one per building, and nothing else:
 {action_fmt}
 """
