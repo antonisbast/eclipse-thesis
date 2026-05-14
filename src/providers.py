@@ -1,4 +1,4 @@
-"""LLM providers used by notebooks 02 and 03.
+"""LLM providers used by notebooks 02, 03, 05, and 06.
 
 `APIProvider`     — remote APIs (Anthropic + OpenAI-compatible: DeepSeek, Kimi, OpenAI).
 `LocalHFProvider` — local HuggingFace causal LM (Colab GPU / DGX).
@@ -14,6 +14,8 @@ import concurrent.futures
 import logging
 import os
 import time
+from contextlib import nullcontext
+from typing import Callable
 
 from src.agent import ACTION_RE, make_minimal_prompt, parse_actions
 
@@ -200,51 +202,114 @@ class APIProvider:
 class LocalHFProvider:
     """HuggingFace local model provider. Drop-in for `APIProvider`.
 
-    Runs inference on the local GPU (Colab T4, DGX Spark, etc.). No API keys,
-    no rate limits. Supports any HF causal LM, including Gemma (system-role
-    workaround), Qwen3 (thinking-mode disabled), and 4-bit quantized models.
+    Used by:
+      • nb 03 — zero-shot SLM (loads from HF Hub via `model_id`).
+      • nb 05 — post-SFT eval (wraps an Unsloth `FastModel` already in memory).
+      • nb 06 — base-vs-SFT generalisation (one PEFT model in memory, two
+        providers — one with `disable_adapter=True` to give the pure base).
+
+    Two construction modes:
+
+    1. Auto-load from HF Hub:
+           LocalHFProvider(model_id="Qwen/Qwen3-4B-Instruct-2507", load_in_4bit=True)
+       Loads the model via `AutoModelForCausalLM.from_pretrained` with optional
+       4-bit NF4 quantization.
+
+    2. Wrap an already-loaded model + tokenizer:
+           LocalHFProvider(model=unsloth_model, tokenizer=tok,
+                           model_id="unsloth/gemma-4-E4B-it",
+                           prompt_builder=make_sft_prompt,
+                           label="sft:gemma-4-E4B-it")
+       Skips the loading path. Use when the model was loaded by something else
+       (Unsloth, peft.PeftModel.from_pretrained, …). `model_id` is still used
+       for the gemma / qwen3 family detection.
 
     Args:
-        model_id:       HuggingFace model ID.
-        load_in_4bit:   Use 4-bit NF4 quantization. Required for 8B models on T4.
-        max_new_tokens: Max tokens generated per call (default for `.complete`).
+        model_id:        HuggingFace model ID. Required in mode 1; in mode 2
+                         it's used only for the gemma/qwen3 family flags and
+                         the default `label`.
+        model:           Pre-loaded HF (or PEFT) causal LM. Pass together with
+                         `tokenizer` to skip auto-loading.
+        tokenizer:       Pre-loaded HF tokenizer. Required if `model` is given.
+        load_in_4bit:    Use 4-bit NF4 quantization (auto-load path only).
+        max_new_tokens:  Max tokens generated per call (default for `.complete`).
+        prompt_builder:  Callable `n_buildings -> str` returning the system
+                         prompt. Defaults to `src.agent.make_minimal_prompt`
+                         (CoT, canonical zero-shot prompt). Pass
+                         `src.sft.make_sft_prompt` (no-CoT) when evaluating a
+                         model fine-tuned on that prompt — mixing the two at
+                         eval is OOD and degrades sharply.
+        disable_adapter: If True and `model` is a PEFT model with an attached
+                         adapter, run `with model.disable_adapter()` during
+                         every `complete()` call → base-model behaviour with
+                         the LoRA bypassed. Used by nb 06 to evaluate the
+                         "pure" Gemma without freeing GPU memory and reloading.
+        label:           Override the auto-generated label used in result
+                         tables. Default: `local:<model_basename>` (or with
+                         a ` (base)` suffix when `disable_adapter=True`).
     """
 
     def __init__(
         self,
-        model_id: str,
+        model_id: str | None = None,
+        *,
+        model=None,
+        tokenizer=None,
         load_in_4bit: bool = False,
         max_new_tokens: int = 250,
+        prompt_builder: Callable[[int], str] | None = None,
+        disable_adapter: bool = False,
+        label: str | None = None,
     ):
         import torch
-        from transformers import AutoTokenizer, AutoModelForCausalLM
 
-        self.model_id       = model_id
-        self.name           = "local_hf"
-        self.label          = f"local:{model_id.split('/')[-1]}"
-        self.max_new_tokens = max_new_tokens
-        self._device        = "cuda" if torch.cuda.is_available() else "cpu"
-        self._is_qwen3      = "qwen3" in model_id.lower()
-        self._is_gemma      = "gemma" in model_id.lower()
+        if (model is None) != (tokenizer is None):
+            raise ValueError("Pass model and tokenizer together, or neither.")
+        if model is None and model_id is None:
+            raise ValueError("Provide model_id (auto-load) or (model, tokenizer).")
 
-        print(f"Loading {model_id} on {self._device} …")
-        load_kw: dict = {"device_map": "auto"}
-        if load_in_4bit:
-            from transformers import BitsAndBytesConfig
-            load_kw["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                # float16 (not bfloat16) for T4 compatibility
-                bnb_4bit_compute_dtype=torch.float16,
-            )
+        self.max_new_tokens  = max_new_tokens
+        self.prompt_builder  = prompt_builder or make_minimal_prompt
+        self.disable_adapter = disable_adapter
+        self.name            = "local_hf"
+
+        if model is not None:
+            # Mode 2: wrap a pre-loaded model.
+            self.model     = model
+            self.tokenizer = tokenizer
+            self.model_id  = model_id or getattr(model, "name_or_path", "loaded_model")
+            self._device   = next(model.parameters()).device
         else:
-            load_kw["torch_dtype"] = (
-                torch.float16 if self._device == "cuda" else torch.float32
-            )
+            # Mode 1: auto-load from HF Hub.
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+            self.model_id = model_id
+            self._device  = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self.model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+            print(f"Loading {model_id} on {self._device} …")
+            load_kw: dict = {"device_map": "auto"}
+            if load_in_4bit:
+                from transformers import BitsAndBytesConfig
+                load_kw["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    # float16 (not bfloat16) for T4 compatibility
+                    bnb_4bit_compute_dtype=torch.float16,
+                )
+            else:
+                load_kw["torch_dtype"] = (
+                    torch.float16 if self._device == "cuda" else torch.float32
+                )
+
+            self.model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+            n_params = sum(p.numel() for p in self.model.parameters()) / 1e9
+            mem_gb   = torch.cuda.memory_allocated() / 1e9 if self._device == "cuda" else 0.0
+            print(f"  ✓ {n_params:.2f}B params | GPU mem: {mem_gb:.1f} GB")
+
         self.model.eval()
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self._is_qwen3 = "qwen3" in str(self.model_id).lower()
+        self._is_gemma = "gemma"  in str(self.model_id).lower()
+
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -257,13 +322,18 @@ class LocalHFProvider:
                 "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
             )
 
-        n_params = sum(p.numel() for p in self.model.parameters()) / 1e9
-        mem_gb   = torch.cuda.memory_allocated() / 1e9 if self._device == "cuda" else 0.0
-        print(f"  ✓ {n_params:.2f}B params | GPU mem: {mem_gb:.1f} GB")
+        # Default label — caller can override (useful in nb 06 where two
+        # providers share the same underlying model).
+        suffix = str(self.model_id).split('/')[-1]
+        adapter_tag = " (base)" if disable_adapter else ""
+        self.label = label or f"local:{suffix}{adapter_tag}"
+
         if self._is_qwen3:
             print("  Qwen3 detected — thinking mode disabled (enable_thinking=False)")
         if self._is_gemma:
             print("  Gemma detected — system prompt merged into user message")
+        if disable_adapter:
+            print("  disable_adapter=True — every forward bypasses the LoRA")
 
     def complete(
         self,
@@ -304,7 +374,14 @@ class LocalHFProvider:
             input_ids      = encoded["input_ids"]
             attention_mask = encoded.get("attention_mask", torch.ones_like(input_ids))
 
-        with torch.no_grad():
+        # PEFT context: temporarily disable the LoRA adapter for this
+        # forward when the caller asked for base-only behaviour.
+        adapter_ctx = (
+            self.model.disable_adapter()
+            if self.disable_adapter and hasattr(self.model, "disable_adapter")
+            else nullcontext()
+        )
+        with torch.no_grad(), adapter_ctx:
             output_ids = self.model.generate(
                 input_ids,
                 attention_mask=attention_mask,
@@ -329,7 +406,7 @@ class LocalHFProvider:
 
         Returns (actions, raw_response, used_fallback).
         """
-        _system  = system or make_minimal_prompt(n_buildings)
+        _system  = system or self.prompt_builder(n_buildings)
         last_raw = ""
 
         for attempt in range(max_retries):
