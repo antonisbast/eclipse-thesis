@@ -3,9 +3,19 @@
 This document summarizes critical mechanics, bugs, and best practices for developing reinforcement learning or LLM-based controllers in CityLearn, based on recent experiments.
 
 ## 1. Observation State Bug & Workaround
-- **The Bug**: The raw observation vector returned by `env.step()` can fail to correctly update `electrical_storage_soc` and `net_electricity_consumption` due to a known CityLearn bug.
-- **The Fix**: Bypass the observation vector by reading directly from the building objects (e.g., `building.electrical_storage.soc[t]`, `building.net_electricity_consumption[t]`). A custom `snapshot_state(env)` function is highly recommended.
+- **The Bug (CityLearn 2.5.x ONLY)**: The raw observation vector returned by `env.step()` reads `electrical_storage_soc` and `net_electricity_consumption` at index `self.time_step` of their respective arrays — but at that point the slot has not yet been written (it's the next-step initial value, typically 0). The agent therefore sees stale (≈0) values for these two fields. Verified directly in `citylearn==2.5.0`'s `building.py`:
+  ```python
+  'electrical_storage_soc': self.electrical_storage.soc[self.time_step],          # wrong: slot not yet written
+  'net_electricity_consumption': self.net_electricity_consumption[self.time_step], # same
+  ```
+- **Fixed in CityLearn 2.6.0b2+**: the `BuildingOpsService.get_observations_data()` helper now uses
+  ```python
+  endogenous_t = t if include_all else max(t - 1, 0)
+  ```
+  so for the agent-facing call (`include_all=False`) it reads `soc[t-1]` / `net[t-1]` — the just-realised values. Project is pinned to 2.6.0b2 everywhere, so any agent that consumes the obs vector (including the bundled CityLearn SAC) sees correct SoC and net.
+- **`snapshot_state` is still recommended** even on 2.6+: it always reads from building objects directly, so it's version-independent and makes the data path explicit when prompting an LLM. It is also slightly more flexible (you can choose which timestep to read).
 - **Formatting Note**: Be aware of NumPy 2.0+ scalar formatting (e.g., `np.int32(12)`) when parsing raw observations directly.
+- **Reference**: CityLearn issue [#37](https://github.com/intelligent-environments-lab/CityLearn/issues/37) is a different SoC bug (capacity-after-degradation divisor). The obs-vector indexing bug above isn't filed upstream — it was identified by inspecting installed source.
 
 ## 2. Variable Scales & Meanings
 - **`non_shiftable_load`**: Fixed building demand in kWh per hour. Typical range: ~0.1 to 7.0 kWh.

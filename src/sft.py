@@ -37,12 +37,9 @@ import numpy as np
 # pulling src.agent explicitly. _ACTION_RE alias kept for older callers.
 from src.agent import (
     PRICE_PEAK_THRESHOLD,
-    IRRADIANCE_LOW_THRESHOLD,
-    IRRADIANCE_HIGH_THRESHOLD,
     price_bucket,
     carbon_bucket,
     solar_bucket,
-    irradiance_bucket,
     render_state,
     parse_actions,
     ACTION_RE,
@@ -61,14 +58,24 @@ def action_to_token(a: float, idle_threshold: float = IDLE_THRESHOLD) -> str:
     """Map a SAC action ∈ [-1, 1] to a discrete prompt token.
 
     |a| < idle_threshold        → 'IDLE'
-    a > 0  → 'CHARGE_{20|40|60|80|100}'    (rounded to nearest 20%)
+    a > 0  → 'CHARGE_{20|40|60|80|100}'    (round-half-up to nearest 20%)
     a < 0  → 'DISCHARGE_{20|40|60|80|100}'
+
+    Bucket boundaries land at 0.30, 0.50, 0.70, 0.90 (uniform 0.20-wide
+    buckets, except IDLE at [0, 0.10) and *_100 at [0.90, 1.00]).
+
+    NOTE: do NOT use ``round(...)`` here — Python 3 uses banker's rounding,
+    which makes 0.50 → CHARGE_40 (instead of 60) and 0.70 → CHARGE_80
+    (instead of 60-or-80), squeezing the 60 and 100 buckets. Integer
+    round-half-up is symmetric and matches the prompt's stated 20%-step
+    layout.
     """
     a = float(np.clip(a, -1.0, 1.0))
     if abs(a) < idle_threshold:
         return "IDLE"
     direction = "CHARGE" if a > 0 else "DISCHARGE"
-    pct = int(round(abs(a) * 100 / 20) * 20)
+    units = int(round(abs(a) * 100))            # 0..100
+    pct   = ((units + 10) // 20) * 20           # round half up to nearest 20
     pct = max(ACTION_BUCKETS_PCT[0], min(ACTION_BUCKETS_PCT[-1], pct))
     return f"{direction}_{pct}"
 
@@ -111,9 +118,9 @@ You manage batteries in {n_buildings} buildings that share one grid meter. Each 
 CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISCHARGE_40, DISCHARGE_60, DISCHARGE_80, DISCHARGE_100
 
 [State]
-- 'price' (LOW / MID / PEAK): how expensive grid electricity is now.
+- 'price' (LOW / PEAK): how expensive grid electricity is now.
 - 'carbon' (LOW / MID / HIGH): how dirty grid electricity is now.
-- 'solar' (NONE / LOW / MID / HIGH): the building's solar generation now.
+- 'solar' (NONE / LOW / HIGH): the building's solar generation now.
 - 'load' (kWh): the building's electricity demand now.
 - 'SoC' (%): how full the battery is. 0% empty, 100% full.
 - 'last_net' (kWh): grid draw last step — your feedback signal.
@@ -192,6 +199,7 @@ def dump_sac_trajectory_jsonl(
     n_buildings: int | None = None,
     include_meta: bool = True,
     building_slices: list[list[int]] | None = None,
+    seed: int | None = None,
 ) -> dict[str, Any]:
     """Run SAC deterministically for one full episode and write a JSONL
     SFT dataset.
@@ -212,6 +220,10 @@ def dump_sac_trajectory_jsonl(
                          slice width if `building_slices` is given, else
                          `len(env.buildings)`.
         include_meta:    Include t, actions_float, reward, slice fields per row.
+        seed:            Optional seed passed to env.reset() — required for
+                         deterministic JSONL across re-runs if the schema
+                         configures stochastic initial battery SoC. If None,
+                         env.reset() uses whatever seed CityLearn was built with.
         building_slices: Optional list of index-lists. For each env step, one
                          row is emitted per slice — the state_text and action
                          block are restricted to that subset of buildings.
@@ -250,7 +262,7 @@ def dump_sac_trajectory_jsonl(
             f"pass building_slices with the desired per-row width instead."
         )
 
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=seed) if seed is not None else env.reset()
     done, t = False, 0
     n_steps = 0
     n_rows  = 0

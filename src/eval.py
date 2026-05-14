@@ -127,6 +127,13 @@ def zne_metric(env: CityLearnEnv, label: str) -> pd.Series:
     ZNE ratio = total solar generation / total grid import.
     ≥ 1.0 means the district generated at least as much solar as it imported.
 
+    Raises:
+        KeyError: if any of the required CityLearn 2.6 KPI columns is missing
+                  from `env.evaluate_v2()`. Earlier versions silently defaulted
+                  to import=1.0, which made ZNE numbers look meaningful while
+                  being wrong. Fail loudly so the user upgrades / pins
+                  CityLearn 2.6.0b2+ instead.
+
     Args:
         env:   A CityLearnEnv after at least one completed episode.
         label: Agent name (used as Series name).
@@ -135,10 +142,16 @@ def zne_metric(env: CityLearnEnv, label: str) -> pd.Series:
         Series with solar generation, grid import, ZNE ratio, ZNE flag, and
         self-consumption ratio.
     """
-    d     = district_kpis(env)
-    solar = float(d.get(_ZNE_SOLAR_COL,  0.0))
-    imp   = float(d.get(_ZNE_IMPORT_COL, 1.0))
-    sc    = float(d.get(_ZNE_SC_COL,     float("nan")))
+    d = district_kpis(env)
+    missing = [c for c in (_ZNE_SOLAR_COL, _ZNE_IMPORT_COL, _ZNE_SC_COL) if c not in d.index]
+    if missing:
+        raise KeyError(
+            "ZNE columns missing from env.evaluate_v2() — "
+            f"expected {missing}. Check that CityLearn ≥ 2.6.0b2 is installed."
+        )
+    solar = float(d[_ZNE_SOLAR_COL])
+    imp   = float(d[_ZNE_IMPORT_COL])
+    sc    = float(d[_ZNE_SC_COL])
     zne   = solar / max(imp, 1e-6)
     return pd.Series(
         {

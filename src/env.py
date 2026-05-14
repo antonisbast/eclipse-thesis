@@ -117,10 +117,23 @@ class MERLINReward(RewardFunction):
 class EcoPeakBatteryReward(RewardFunction):
     """Multi-objective reward: cost + carbon + peak shaving, all normalised.
 
-    eco    = w_cost · (price / MAX_PRICE) + w_carbon · (carbon / MAX_CARBON)
-    base   = −(1 + sign(net·eco) · SoC) · |net·eco / MAX_NET_LOAD|
-    peak   = −w_peak · (net / MAX_NET_LOAD)²
-    reward = base + peak
+    Per-building cost/carbon term (still per-building because each building has
+    its own SoC and net):
+        eco_i  = w_cost · (price / MAX_PRICE) + w_carbon · (carbon / MAX_CARBON)
+        base_i = −(1 + sign(net_i·eco_i) · SoC_i) · |net_i·eco_i / MAX_NET_LOAD|
+
+    DISTRICT-LEVEL peak term — the actual `daily_peak_average` KPI is computed
+    on the district sum, not per-building. Squaring per-building rewarded a
+    building that *exported* (negative net) just as much as one that imported;
+    summing first matches the KPI. The district peak is then distributed
+    equally across buildings so the per-building reward list still sums to the
+    intended district peak.
+
+        net_district = Σ_i (net_i / MAX_NET_LOAD)
+        peak_total   = −w_peak · max(net_district, 0.0)²
+        peak_i       = peak_total / n_buildings
+
+        reward_i = base_i + peak_i
 
     Activate via: make_env(reward_fn="eco")
     """
@@ -134,7 +147,8 @@ class EcoPeakBatteryReward(RewardFunction):
         self.max_price, self.max_carbon, self.max_net_load = max_price, max_carbon, max_net_load
 
     def calculate(self, observations: list[dict]) -> list[float]:
-        rewards = []
+        bases: list[float] = []
+        norm_nets: list[float] = []
         for o in observations:
             norm_price  = o.get("electricity_pricing",         0.0) / self.max_price
             norm_carbon = o.get("carbon_intensity",            0.0) / self.max_carbon
@@ -143,8 +157,16 @@ class EcoPeakBatteryReward(RewardFunction):
             eco    = self.w_cost * norm_price + self.w_carbon * norm_carbon
             cost   = norm_net * eco
             base   = -(1.0 + np.sign(cost) * soc) * abs(cost)
-            peak   = -(max(norm_net, 0.0) ** 2) * self.w_peak
-            rewards.append(float(base + peak))
+            bases.append(float(base))
+            norm_nets.append(float(norm_net))
+
+        # District-level peak (matches the daily_peak_average KPI).
+        net_district = sum(norm_nets)
+        peak_total   = -(max(net_district, 0.0) ** 2) * self.w_peak
+        n            = max(len(bases), 1)
+        peak_share   = peak_total / n
+
+        rewards = [b + peak_share for b in bases]
         return [float(sum(rewards))] if self.central_agent else rewards
 
 
@@ -178,7 +200,8 @@ def make_env(
                        Phase 3 single-agent SLM work, pass
                        `buildings=TRAINING_BUILDINGS` ([0,1,2]) explicitly.
         start:         Simulation start timestep. Default 0 (full year).
-        end:           Simulation end timestep. Default 8758 (full year).
+        end:           Simulation end timestep. Default 8759 (inclusive — full
+                       year of 8760 hourly steps, indices 0..8759).
         reward_fn:     'merlin' (default, dataset-agnostic) or 'eco' (multi-objective).
         obs_set:       'sac' or 'llm' — both are the same 9 real-time variables
                        (oracle forecast fields are intentionally excluded; see

@@ -21,6 +21,80 @@
 
 ## Log
 
+### 2026-05-14 — Project-wide code review + 22 fixes [LOCAL]
+- **Scope:** end-to-end review of `src/*.py`, `configs/experiment.yaml`,
+  and notebooks 01 / 04 / 05 / 06 / 07 ahead of the Phase 3 RL run.
+  Full findings table and per-file changes in [REVIEW_2026-05-14.md](REVIEW_2026-05-14.md).
+- **Critical fixes (will corrupt results or crash a run):**
+  - **nb 05 N_BUILDINGS=3** (#1): previous setup told the model "manage 6
+    buildings" while every JSONL row was 3-bldg state + 3-line response,
+    AND eval rolled out on a 6-bldg env the SLM had never seen — headline
+    Phase I was uninterpretable. `make_colab_env` now defaults to
+    `TRAINING_BUILDINGS=[0,1,2]` and routes through `src.env.make_env`.
+  - **nb 06 `NameError: _ACTION_RE`** (#2): cherry-picked the e543a387 fix
+    that was applied to nb 05 but missed nb 06.
+  - **nb 07 LoRA warm-start was silent** (#6): old `try/except` could
+    swallow a `load_adapter` failure and degrade "RL from SFT" to "RL from
+    base". Now stamps the SFT state_dict via `set_peft_model_state_dict`
+    and **hard-asserts** that a probe LoRA-A weight changed.
+  - **nb 07 KL term could go negative** (#7): `(lp_pol - lp_ref).mean()`
+    rewards drift for finite samples. Replaced with the k3 estimator
+    (`exp(log_ratio) - 1 - log_ratio`), element-wise ≥ 0.
+  - **nb 07 prompt was OOD vs SFT** (#8): used `make_minimal_prompt` (CoT)
+    against an SFT'd model trained on `make_sft_prompt` (no-CoT). Same
+    failure mode as the historical nb05 § 19 blowup.
+  - **prompt buckets didn't match real labels** (#5): `make_minimal_prompt`
+    and `make_sft_prompt` advertised `price (LOW / MID / PEAK)` and
+    `solar (NONE / LOW / MID / HIGH)`, but the bucket fns only emit 2 and
+    3 levels respectively. Prompts now match reality.
+- **High-impact fixes:**
+  - **action_to_token banker's rounding bias** (#10): SAC actions at
+    0.50/0.70/0.90 were squeezed into wrong buckets (e.g. 0.50→CHARGE_40,
+    should be CHARGE_60). Replaced with integer round-half-up — uniform
+    0.20-wide buckets, symmetric for charge/discharge.
+  - **nb 07 rollout window off-by-one** (#9): `end=t0+WINDOW_STEPS` →
+    `end=t0+WINDOW_STEPS-1` (CityLearn end is inclusive).
+  - **nb 01 SIM_END 8758→8759** (#11): one step short of a year; aligned
+    with `src/env.py`.
+  - **nb 01 EcoPeakBatteryReward** (#4, #23): inline copy diverged from
+    `src/env.py` (penalised exports). Both copies now use a
+    **district-level** peak term (sum first, then square, clamped
+    non-negative), distributed across buildings.
+  - **ZNE column validation** (#15): `src.eval.zne_metric` now raises
+    `KeyError` if expected CityLearn columns are missing rather than
+    silently defaulting `imp = 1.0`.
+- **Medium fixes:** dump_sac_trajectory seed thread (#17); nb 04 render
+  flag removed for dump-only env (#18); nb 06 pip version pins quoted
+  (#19); nb 06 TRAIN_BUILDINGS aligned to TRAINING_BUILDINGS (#20); nb 06
+  uses `src.env.make_env` for matching schema source (#21); configs/
+  experiment.yaml rewritten to current state (#22).
+- **Cleanup:** irradiance constants + `irradiance_bucket` removed (#24) —
+  the observation is no longer used anywhere in the pipeline.
+- **Retracted (#16):** initial claim that SAC trained on a stale obs
+  vector (SoC always 0). Verified in `citylearn==2.5.0` source — bug is
+  real on 2.5. **Fixed in 2.6.0b2** via `endogenous_t = max(t-1, 0)` in
+  `BuildingOpsService.get_observations_data()`. Project pins 2.6.0b2 in
+  every install cell so SAC training was correct all along. My test ran
+  against system-Python 2.5.0, not the Colab 2.6.0b2 the actual pipeline
+  uses. `docs/CITYLEARN_INSIGHTS.md` § 1 updated to mark this as
+  2.5-only and the workaround as version-independent.
+- **Open items:**
+  - **Gemma `RESPONSE_TEMPLATE`** (#13) — `"<|turn>model\n"` doesn't look
+    like a Gemma chat marker (real is `<start_of_turn>model\n`). If the
+    marker is wrong, every prior SFT run was effectively training on
+    prompt boilerplate. **Awaiting cell 19 paste-outputs from user
+    before editing.**
+  - **#3 sys_p_cot undefined** in nb 05 cells 44/46 — user planned to
+    delete those cells.
+- **Re-run scope:**
+  - nb 04 — recommended (rounding fix changes ~10–15% of JSONL rows). Can
+    re-use the existing SAC pickle (no SAC retrain).
+  - nb 05 — required (N_BUILDINGS=3 fundamental fix).
+  - nb 06 — required (was crashing).
+  - nb 07 — not yet run; use fixed version.
+  - nb 01 — optional (SIM_END off-by-one and eco-reward fix shift Phase I
+    by <10⁻³; only retrain for bit-exact match).
+
 ### 2026-05-13 — Colab CityLearn-version fixes + SAC distillation dataset pushed [LOCAL]
 - Aligned `WEEK_START = 3624` across nb 02 and nb 03 (nb 03 had 2624) so remote-API and local-SLM zero-shot results are on the same window for direct comparison.
 - Pinned CityLearn 2.6.0b2 in nb 03 and nb 05 install cells (both were resolving to 2.5, which only has the legacy `env.evaluate()` and crashed `src.eval` calls). All three Colab notebooks (03, 05, 06) now use the same install pattern: `CITYLEARN_VERSION = "2.6.0b2"` + `pip install --pre --no-deps` + `startswith("2.6")` assertion.

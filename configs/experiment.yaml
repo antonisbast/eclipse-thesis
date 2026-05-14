@@ -3,6 +3,12 @@
 # ============================================================
 # All hyperparameters live here. Never hardcode values in code.
 # Use `scale` presets to switch between local debug and full runs.
+#
+# Phase mapping (matches docs/STATUS_FOR_RL_HANDOFF.md §2):
+#   Phase 1 — SAC expert baseline + RBC/no-op (✅ done)
+#   Phase 2 — zero-shot LLM/SLM as policy (✅ done)
+#   Phase 3 — LoRA SFT on SAC distillation, then online RL (🟡 in progress)
+#   Phase 4 — two-agent deployment, partial observability (⏳ pending)
 
 # --- Scale presets ---
 # Set scale to "debug" for local MacBook testing, "full" for Colab/DGX
@@ -10,104 +16,104 @@ scale: debug
 
 presets:
   debug:
-    num_buildings: 2
-    num_episodes: 10
+    num_buildings: 3
+    num_episodes: 5
     num_seeds: 1
     device: cpu
   full:
     num_buildings: 6
-    num_episodes: 300
-    num_seeds: 5
+    num_episodes: 30
+    num_seeds: 3
     device: cuda
 
 # --- CityLearn environment ---
 env:
-  schema: citylearn_challenge_2022_phase_all  # or custom schema path
-  simulation_period_months: 12  # 1 year per episode
-  buildings_per_agent: 3  # in full scale; 1 in debug
+  schema: citylearn_challenge_2022_phase_all
+  simulation_period_months: 12          # 1 year per episode (8760 steps)
+  # Phase 3 single-agent training uses TRAINING_BUILDINGS=[0,1,2] (3 buildings).
+  # Phase 4 deployment uses BUILDINGS=[0..5] split across two agents.
+  training_buildings: [0, 1, 2]
+  heldout_buildings:  [3, 4, 5]
+  unseen_buildings:   [6, 7, 8, 9, 10, 11]
 
-  reward:
-    alpha: 1.0    # peak demand penalty weight
-    beta: 1.0     # electricity cost weight
-    gamma: 0.5    # ramping penalty weight
+  # Reward function: 'merlin' (default, dataset-agnostic, used for distillation)
+  # or 'eco' (multi-objective with cost/carbon/peak normalisation).
+  reward_fn: merlin
 
-# --- RL baselines (Phase 1) ---
-baselines:
-  ppo:
-    total_timesteps: 500_000
-    learning_rate: 0.0003
-    clip_range: 0.2
-    batch_size: 2048
-    n_epochs: 10
-    gae_lambda: 0.95
-    gamma: 0.99
-    policy_arch: [256, 256]
+# --- SAC expert baseline (Phase 1) ---
+sac:
+  episodes: 30                          # CityLearn agent.learn(episodes=N)
+  # SAC hyperparameters live inside citylearn.agents.sac.SAC; override at
+  # construction time if needed (lr, gamma, tau, buffer_size, batch_size).
 
-  sac:
-    total_timesteps: 500_000
-    learning_rate: 0.0003
-    buffer_size: 100_000
-    batch_size: 256
-    tau: 0.005
-    gamma: 0.99
-    policy_arch: [256, 256]
+# --- SAC → SLM distillation dataset (Phase 3, nb 04) ---
+distillation:
+  building_slices: [[0, 1, 2], [3, 4, 5]]   # 2× SFT data, building-agnostic
+  idle_threshold: 0.10                       # |a| < this → IDLE token
+  # Filtering: drop rows where every building is physically a no-op.
+  filter:
+    soc_eps: 0.02
+    act_eps: 0.05
 
-# --- Trajectory-to-rationale conversion (Phase 1) ---
-rationale:
-  num_expert_rollouts: 100
-  quality_filter_percentile: 20  # drop bottom 20% of episodes
-  target_dataset_size: 40_000
-
-# --- SLM fine-tuning (Phase 1) ---
+# --- LoRA SFT (Phase 3, nb 05) ---
 finetuning:
-  model_name: Qwen/Qwen3-4B  # or meta-llama/Llama-3.1-8B
+  model_name: unsloth/gemma-4-E4B-it    # Gemma-4 E4B, 4-bit via Unsloth
+  load_in_4bit: true
   lora_rank: 16
   lora_alpha: 32
-  target_modules:
-    - q_proj
+  lora_dropout: 0.0
+  target_modules:                       # Unsloth picks these automatically;
+    - q_proj                            # listed for reference only.
     - k_proj
     - v_proj
     - o_proj
     - gate_proj
     - up_proj
     - down_proj
-  epochs: 3
+  epochs: 1                             # 1 epoch — loss flattens by step ~200
   learning_rate: 0.0002
   batch_size: 4
-  gradient_accumulation_steps: 8  # effective batch = 32
+  gradient_accumulation_steps: 8        # effective batch = 32
   max_seq_length: 1024
+  eval_ratio: 0.05                      # 5% held out for eval loss
 
-  # Validation gate
+  # Validation gate before kicking off Phase 4
   validation_gate:
-    min_performance_ratio: 0.70  # ≥70% of expert RL performance
-    eval_episodes: 10
+    min_performance_ratio: 0.70         # ≥70% of SAC expert Phase I score
+    eval_episodes: 1                    # one full year is the canonical eval
 
-# --- Online RL (Phase 2) ---
+# --- Online RL (Phase 3 second stage, nb 07) ---
 online_rl:
-  algorithm: grpo  # or ppo_lm
-  num_candidates: 4  # GRPO: candidate generations per observation
-  update_frequency: 100  # update every N timesteps
+  algorithm: grpo                       # group-relative policy optimisation
+  window_steps: 48                      # rollout length per group member
+  group_size: 4                         # candidate generations per t0
+  updates: 200                          # total optimiser updates
+  rollout_temperature: 0.9
+  rollout_top_p: 0.95
   learning_rate: 0.00005
-  kl_penalty_coeff: 0.1  # KL divergence against reference model
-  max_generation_length: 256
+  kl_beta: 0.04                         # KL coeff against frozen reference
+  fallback_penalty: 0.5                 # reward penalty per parse failure
+  max_new_tokens: 120
 
-# --- Coordination (Phase 2) ---
-coordination:
-  experience_sharing:
-    exchange_frequency: 10  # every N episodes
-    buffer_merge_ratio: 0.5  # fraction of partner data to include
+# --- Multi-agent deployment (Phase 4, future) ---
+phase4:
+  agents:
+    alpha_buildings: [0, 1, 2]          # = training_buildings
+    beta_buildings:  [3, 4, 5]          # = heldout_buildings
+  joint_reward: true                    # sum per-building rewards each step
+  communication: false                  # action-only, no message channel
 
 # --- Experiment tracking ---
 wandb:
   project: eclipse-thesis
-  entity: null  # set your wandb username
+  entity: null
   tags: []
 
 # --- Checkpointing (Colab resilience) ---
 checkpoint:
-  save_every_n_episodes: 10
-  save_dir: /content/drive/MyDrive/eclipse-thesis/checkpoints  # Colab path
-  local_save_dir: ./checkpoints  # local fallback
+  save_every_n_steps: 100
+  drive_dir: /content/drive/MyDrive/eclipse-thesis
+  local_save_dir: ./checkpoints
 
 # --- Reproducibility ---
-seed: 42  # override per-run with --seed flag
+seed: 42

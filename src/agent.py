@@ -20,9 +20,9 @@ from src.env import SEED
 
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-PRICE_PEAK_THRESHOLD: float      = 0.30   # $/kWh — above this = PEAK price
-IRRADIANCE_LOW_THRESHOLD: float  = 50     # W/m²  — below this = NONE
-IRRADIANCE_HIGH_THRESHOLD: float = 600    # W/m²  — above this = HIGH
+# Bucket labels MUST match the strings in make_minimal_prompt / make_sft_prompt
+# below — the SLM is told these are the only categories it will see.
+PRICE_PEAK_THRESHOLD: float = 0.30   # $/kWh — above this = PEAK price
 
 
 def price_bucket(v: float | None) -> str:
@@ -47,16 +47,6 @@ def solar_bucket(v: float | None) -> str:
     if v <= 0.0:
         return "NONE"
     if v < 0.5:
-        return "LOW"
-    return "HIGH"
-
-
-def irradiance_bucket(v: float | None) -> str:
-    if v is None:
-        return "?"
-    if v < IRRADIANCE_LOW_THRESHOLD:
-        return "NONE"
-    if v < IRRADIANCE_HIGH_THRESHOLD:
         return "LOW"
     return "HIGH"
 
@@ -148,9 +138,9 @@ You manage batteries in {n_buildings} buildings that share one grid meter. Each 
 CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISCHARGE_40, DISCHARGE_60, DISCHARGE_80, DISCHARGE_100
 
 [State]
-- 'price' (LOW / MID / PEAK): how expensive grid electricity is now.
+- 'price' (LOW / PEAK): how expensive grid electricity is now.
 - 'carbon' (LOW / MID / HIGH): how dirty grid electricity is now.
-- 'solar' (NONE / LOW / MID / HIGH): the building's solar generation now.
+- 'solar' (NONE / LOW / HIGH): the building's solar generation now.
 - 'load' (kWh): the building's electricity demand now.
 - 'SoC' (%): how full the battery is. 0% empty, 100% full.
 - 'last_net' (kWh): grid draw last step — your feedback signal.
