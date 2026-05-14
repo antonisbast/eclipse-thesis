@@ -113,9 +113,6 @@ Ratios to a no-battery baseline (1.0 = no improvement, < 1.0 = better):
 5. **No oracle forecasts** — see §3.
 6. **`central_agent=False`** everywhere; joint reward (Phase 4) is computed in the rollout loop by summing the per-building reward list.
 
-### Validation gate before any Phase 4 work
-The fine-tuned single SLM must reach **≥70% of SAC Phase I** on `TRAINING_BUILDINGS` (in-distribution).  
-Generalization gap (`TRAINING → HELDOUT`) reported separately for RQ2.
 
 ---
 
