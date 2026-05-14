@@ -34,7 +34,7 @@ import numpy as np
 # State rendering, buckets, thresholds, and the inference-time action regex
 # are defined ONCE in src/agent.py. We re-export them here so nb 04/05
 # can do `from src.sft import render_state, parse_actions, ...` without
-# pulling src.agent explicitly. _ACTION_RE alias kept for older callers.
+# pulling src.agent explicitly.
 from src.agent import (
     PRICE_PEAK_THRESHOLD,
     price_bucket,
@@ -44,8 +44,6 @@ from src.agent import (
     parse_actions,
     ACTION_RE,
 )
-
-_ACTION_RE = ACTION_RE   # legacy alias — keep for any external import
 
 
 # ── Action discretisation (SAC float ↔ prompt token) ──────────────────────

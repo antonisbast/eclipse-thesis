@@ -39,6 +39,25 @@ HEADLINE_KPIS = [
 ]
 
 
+def _unpack_policy_result(
+    result, t: int, snap: list[dict], raw_log: list[dict]
+) -> tuple[list[float], bool]:
+    """Normalise a policy_fn return value.
+
+    LLM policies return `(acts, raw_text, fallback_flag)`; simple policies
+    (noop/random/RBC) return just `acts`. We log the LLM raw text into
+    `raw_log` and return `(acts, fallback)` either way.
+    """
+    if isinstance(result, tuple):
+        acts, raw, fb = result
+        raw_log.append({
+            "t": t, "state_text": render_state(snap),
+            "raw": raw, "fallback": bool(fb),
+        })
+        return acts, bool(fb)
+    return result, False
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Rollouts
 # ──────────────────────────────────────────────────────────────────────────────
@@ -69,17 +88,8 @@ def run_policy(
     done, t, t0 = False, 0, time.time()
 
     while not done:
-        snap   = snapshot_state(env)
-        result = policy_fn(snap, t)
-
-        if isinstance(result, tuple):
-            acts, raw, fb = result
-            raw_log.append({
-                "t": t, "state_text": render_state(snap),
-                "raw": raw, "fallback": bool(fb),
-            })
-        else:
-            acts = result
+        snap = snapshot_state(env)
+        acts, _fb = _unpack_policy_result(policy_fn(snap, t), t, snap, raw_log)
 
         n = len(acts)
         _obs, reward, terminated, truncated, _ = env.step([[float(a)] for a in acts])
@@ -152,22 +162,8 @@ def run_policy_dual_agent(
         snap_a = [snap[i] for i in agent_a_bldgs]
         snap_b = [snap[i] for i in agent_b_bldgs]
 
-        result_a = policy_a(snap_a, t)
-        result_b = policy_b(snap_b, t)
-
-        if isinstance(result_a, tuple):
-            acts_a, raw_a, fb_a = result_a
-            raw_log_a.append({"t": t, "state_text": render_state(snap_a),
-                              "raw": raw_a, "fallback": bool(fb_a)})
-        else:
-            acts_a, fb_a = result_a, False
-
-        if isinstance(result_b, tuple):
-            acts_b, raw_b, fb_b = result_b
-            raw_log_b.append({"t": t, "state_text": render_state(snap_b),
-                              "raw": raw_b, "fallback": bool(fb_b)})
-        else:
-            acts_b, fb_b = result_b, False
+        acts_a, fb_a = _unpack_policy_result(policy_a(snap_a, t), t, snap_a, raw_log_a)
+        acts_b, fb_b = _unpack_policy_result(policy_b(snap_b, t), t, snap_b, raw_log_b)
 
         # Merge α + β into a single action vector in global building-index order
         acts_combined = [0.0] * n_total
@@ -245,10 +241,6 @@ def summarize_district(df: pd.DataFrame, label: str, n_buildings: int = N_BUILDI
         "peak_net_kW":    float(dist_net.max()),
         "total_net_kWh":  float(dist_net.sum()),
     }
-
-
-# district_kpis was here — removed. Use src.eval.district_kpis (evaluate_v2,
-# CityLearn 2.6+) for the single canonical KPI extractor.
 
 
 def per_agent_summary(df: pd.DataFrame, agent_name: str, bldg_indices: list[int]) -> dict:

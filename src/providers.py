@@ -138,21 +138,18 @@ class APIProvider:
         if timeout_s is None:
             return _call()
 
+        # Background-thread the call so a hung endpoint can't freeze the rollout.
         executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="api_call"
         )
         future = executor.submit(_call)
         try:
-            result = future.result(timeout=timeout_s)
-            executor.shutdown(wait=False)
-            return result
+            return future.result(timeout=timeout_s)
         except concurrent.futures.TimeoutError:
             future.cancel()
-            executor.shutdown(wait=False)
             raise TimeoutError(f"{self.label} did not respond within {timeout_s:.0f}s")
-        except Exception:
+        finally:
             executor.shutdown(wait=False)
-            raise
 
     def step(
         self,

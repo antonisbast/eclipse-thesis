@@ -1,7 +1,7 @@
 """LLM-as-policy primitives shared by notebooks 02 (remote APIs) and 03 (local SLM).
 
 Contents:
-- Threshold constants and bucket functions (price / carbon / solar / irradiance).
+- Threshold constants and bucket functions (price / carbon / solar).
 - `render_state` — snapshot → human-readable prompt string.
 - `parse_actions` — extract `<action building=i>...</action>` tags into floats.
 - `make_minimal_prompt` — system prompt with discrete CHARGE/IDLE/DISCHARGE bins.
@@ -112,13 +112,12 @@ def parse_actions(text: str, n_buildings: int) -> list[float]:
         direction = m.group(2).upper()
         amt_str   = m.group(3)
 
-        val = 0.0
         if direction == "CHARGE" and amt_str:
             val = float(amt_str) / 100.0
         elif direction == "DISCHARGE" and amt_str:
             val = -float(amt_str) / 100.0
-        elif direction == "IDLE":
-            val = 0.0
+        else:
+            val = 0.0  # IDLE or malformed (e.g. CHARGE with no number)
 
         if 0 <= idx < n_buildings:
             acts[idx] = float(np.clip(val, -1.0, 1.0))

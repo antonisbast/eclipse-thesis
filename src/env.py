@@ -259,14 +259,15 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
     out = []
 
     def _at(arr, idx: int):
-        """Safe index — clamps to the last valid entry of `arr`."""
-        return arr[min(idx, len(arr) - 1)]
+        """Safe index — clamps to [0, len(arr)-1] so t-1 at t=0 is fine."""
+        return arr[max(0, min(idx, len(arr) - 1))]
 
     for b in env.buildings:
-        # Clamp to last valid index — env.time_step can sit one past the end
-        # after termination (CityLearn 2.6 behaviour). Some arrays are
-        # shorter than energy_simulation.* (e.g. non_shiftable_load is
-        # populated up to t-1), so we clamp per-array via _at().
+        # env.time_step can sit one past the end after termination
+        # (CityLearn 2.6 behaviour). Some arrays are populated only up to
+        # t-1 (electrical_storage.soc, net_electricity_consumption — see
+        # the SoC obs-vector bug in docs/CITYLEARN_INSIGHTS.md), so we
+        # read those with index t-1 and clamp per-array via _at().
         t = env.time_step
 
         out.append({
@@ -277,7 +278,7 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
             "carbon_intensity":                 float(_at(b.carbon_intensity.carbon_intensity, t)),
             "solar_generation":                 float(_at(b.energy_simulation.solar_generation, t)),
             "non_shiftable_load":               float(_at(b.non_shiftable_load, t)),
-            "electrical_storage_soc":           float(_at(b.electrical_storage.soc, t - 1)) if t > 0 else float(b.electrical_storage.soc[0]),
+            "electrical_storage_soc":           float(_at(b.electrical_storage.soc, t - 1)),
             "net_electricity_consumption_last": float(_at(b.net_electricity_consumption, t - 1)) if t > 0 else 0.0,
         })
     return out
