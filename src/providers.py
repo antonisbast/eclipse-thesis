@@ -286,18 +286,24 @@ class LocalHFProvider:
             self._device  = "cuda" if torch.cuda.is_available() else "cpu"
 
             print(f"Loading {model_id} on {self._device} …")
+            # Gemma is bf16-native — float16 can overflow its large activations.
+            # Mirror the Unsloth tutorial's FastModel(dtype=None) auto-detection:
+            # use bfloat16 where the GPU supports it (L4 / A100), and fall back
+            # to float16 only on T4 (which has no bf16 compute path).
+            _compute_dtype = (
+                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            )
             load_kw: dict = {"device_map": "auto"}
             if load_in_4bit:
                 from transformers import BitsAndBytesConfig
                 load_kw["quantization_config"] = BitsAndBytesConfig(
                     load_in_4bit=True,
                     bnb_4bit_quant_type="nf4",
-                    # float16 (not bfloat16) for T4 compatibility
-                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_compute_dtype=_compute_dtype,
                 )
             else:
                 load_kw["torch_dtype"] = (
-                    torch.float16 if self._device == "cuda" else torch.float32
+                    _compute_dtype if self._device == "cuda" else torch.float32
                 )
 
             self.model = AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
