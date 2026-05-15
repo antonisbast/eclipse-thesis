@@ -16,6 +16,10 @@ Design choices
   vocabulary the prompt uses (CHARGE_20…100, IDLE, DISCHARGE_20…100).
   20 % steps match the prompt; SAC outputs in [-1, 1] are bucketed by
   rounding |a|·100 to the nearest 20, then clamped to {20, 40, 60, 80, 100}.
+  When the building SoC is supplied, physical no-ops (discharge from an empty
+  battery, charge into a full one) are relabelled IDLE — they are clipped to
+  zero by CityLearn, so cloning them as DISCHARGE_*/CHARGE_* teaches a token
+  that is harmful elsewhere.
 * The SFT prompt (`make_sft_prompt`) drops the <thought> block from the
   inference prompt — distilling without rationales is simpler and avoids
   having to fabricate one for each SAC action.
@@ -51,8 +55,21 @@ from src.agent import (
 ACTION_BUCKETS_PCT = (20, 40, 60, 80, 100)
 IDLE_THRESHOLD = 0.10  # |a| < 0.10 → IDLE
 
+# Physical no-op thresholds (SoC as a fraction in [0, 1], matching
+# snapshot_state's `electrical_storage_soc`). Discharging at/below EMPTY_SOC,
+# or charging at/above FULL_SOC, is clipped to zero by CityLearn — the
+# realised effect is identical to IDLE.
+EMPTY_SOC = 0.03
+FULL_SOC  = 0.97
 
-def action_to_token(a: float, idle_threshold: float = IDLE_THRESHOLD) -> str:
+
+def action_to_token(
+    a: float,
+    soc: float | None = None,
+    idle_threshold: float = IDLE_THRESHOLD,
+    empty_soc: float = EMPTY_SOC,
+    full_soc: float = FULL_SOC,
+) -> str:
     """Map a SAC action ∈ [-1, 1] to a discrete prompt token.
 
     |a| < idle_threshold        → 'IDLE'
@@ -67,20 +84,48 @@ def action_to_token(a: float, idle_threshold: float = IDLE_THRESHOLD) -> str:
     (instead of 60-or-80), squeezing the 60 and 100 buckets. Integer
     round-half-up is symmetric and matches the prompt's stated 20%-step
     layout.
+
+    Physical no-op relabel: if ``soc`` is given, a discharge at an empty
+    battery (soc ≤ empty_soc) or a charge into a full one (soc ≥ full_soc)
+    is clipped to zero by CityLearn, so its realised effect IS IDLE. We emit
+    'IDLE' for those pairs — cloning them verbatim as DISCHARGE_*/CHARGE_*
+    teaches the student a token that is harmful in states where the battery
+    is NOT empty/full (the dominant failure mode of the SAC-distilled SFT:
+    ~77 % of the teacher's discharge labels were discharges from an empty
+    battery). Pass ``soc=None`` to disable.
     """
     a = float(np.clip(a, -1.0, 1.0))
     if abs(a) < idle_threshold:
         return "IDLE"
     direction = "CHARGE" if a > 0 else "DISCHARGE"
+    if soc is not None:
+        if direction == "DISCHARGE" and soc <= empty_soc:
+            return "IDLE"
+        if direction == "CHARGE" and soc >= full_soc:
+            return "IDLE"
     units = int(round(abs(a) * 100))            # 0..100
     pct   = ((units + 10) // 20) * 20           # round half up to nearest 20
     pct = max(ACTION_BUCKETS_PCT[0], min(ACTION_BUCKETS_PCT[-1], pct))
     return f"{direction}_{pct}"
 
 
-def format_action_block(actions: Iterable[float], n_buildings: int) -> str:
-    """Format a list of float actions as the assistant response body."""
-    tokens = [action_to_token(a) for a in list(actions)[:n_buildings]]
+def format_action_block(
+    actions: Iterable[float],
+    n_buildings: int,
+    socs: Iterable[float] | None = None,
+) -> str:
+    """Format a list of float actions as the assistant response body.
+
+    If ``socs`` is given (per-building SoC fractions, same order as
+    ``actions``), physical no-op actions are relabelled to IDLE — see
+    `action_to_token`.
+    """
+    actions = list(actions)[:n_buildings]
+    if socs is None:
+        tokens = [action_to_token(a) for a in actions]
+    else:
+        socs = list(socs)[:n_buildings]
+        tokens = [action_to_token(a, soc=s) for a, s in zip(actions, socs)]
     while len(tokens) < n_buildings:
         tokens.append("IDLE")
     return "\n".join(
@@ -198,6 +243,7 @@ def dump_sac_trajectory_jsonl(
     include_meta: bool = True,
     building_slices: list[list[int]] | None = None,
     seed: int | None = None,
+    relabel_noops: bool = True,
 ) -> dict[str, Any]:
     """Run SAC deterministically for one full episode and write a JSONL
     SFT dataset.
@@ -234,9 +280,15 @@ def dump_sac_trajectory_jsonl(
                          into Phase 4 agent α (B0–2) or β (B3–5).
                          If None, emits one row per step over all env buildings
                          (legacy behaviour).
+        relabel_noops:   If True (default), a per-building action that is a
+                         physical no-op (discharge from an empty battery /
+                         charge into a full one) is written as IDLE rather
+                         than DISCHARGE_*/CHARGE_*. See `action_to_token`.
+                         The raw SAC float is still kept in `actions_float`.
 
     Returns:
-        Stats dict: {"n_steps", "n_rows", "path", "n_buildings"}.
+        Stats dict: {"n_steps", "n_rows", "path", "n_buildings", "n_slices",
+        "n_relabeled"}.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,6 +316,7 @@ def dump_sac_trajectory_jsonl(
     done, t = False, 0
     n_steps = 0
     n_rows  = 0
+    n_relabeled = 0
 
     with open(out_path, "w") as f:
         while not done:
@@ -278,8 +331,17 @@ def dump_sac_trajectory_jsonl(
             for sl in slices:
                 snap_sl  = [snap[i] for i in sl]
                 acts_sl  = [acts_flat[i] for i in sl]
+                socs_sl  = [float(d.get("electrical_storage_soc", 0.0))
+                            for d in snap_sl]
                 state_text = render_state(snap_sl)
-                response   = format_action_block(acts_sl, n_b)
+                if relabel_noops:
+                    n_relabeled += sum(
+                        action_to_token(a) != action_to_token(a, soc=s)
+                        for a, s in zip(acts_sl, socs_sl)
+                    )
+                response = format_action_block(
+                    acts_sl, n_b, socs=socs_sl if relabel_noops else None
+                )
                 row = {
                     "prompt":   f"STATE:\n{state_text}",
                     "response": response,
@@ -302,4 +364,5 @@ def dump_sac_trajectory_jsonl(
         "path":        str(out_path),
         "n_buildings": n_b,
         "n_slices":    len(slices),
+        "n_relabeled": n_relabeled,
     }

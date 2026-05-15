@@ -21,6 +21,32 @@
 
 ## Log
 
+### 2026-05-15 — SFT dataset diagnosis + no-op relabel [LOCAL]
+- **Why the SFT distillation gave bad results:** ~50 % of all labels in the
+  SAC-distill JSONL were physical no-ops. 77 % of the teacher's DISCHARGE
+  labels were discharges from an empty battery (SoC≤2 %) — clipped to zero by
+  CityLearn, so identical to IDLE. Discretisation turned a clipped float into
+  a confident `DISCHARGE_40` token. The SLM minimised loss by always emitting
+  `DISCHARGE_20` (42.6 % majority class) → degenerate distilled policy.
+- **Root cause upstream:** the SAC teacher is undertrained (30 episodes,
+  Phase I 0.824 vs RBC 0.942) and barely cycles the batteries — mean SoC
+  14–29 %/building, empty 48–72 % of the time.
+- **Fix #1 done — `src/sft.py`:** `action_to_token` gained a `soc` arg;
+  `format_action_block` a `socs` arg; `dump_sac_trajectory_jsonl` a
+  `relabel_noops=True` flag (+ `n_relabeled` stat). A discharge at SoC≤3 %
+  or a charge at SoC≥97 % is now written as IDLE — physically exact, and
+  stops cloning a token that is harmful in non-empty/full states. Raw SAC
+  float still kept in `actions_float`.
+- **Effect (measured on existing JSONL):** post-`filter_uninformative_rows`
+  token mix goes from DISCHARGE_20-dominated/no-op-poisoned to IDLE 48 %,
+  CHARGE_20 15 %, CHARGE_40 11 %, DISCHARGE_20 18 %, DISCHARGE_40 7 % —
+  honest labels. IDLE share is still high because the teacher genuinely
+  idles that much.
+- **Still open (not done):** retrain SAC much longer (the real ceiling fix);
+  consider class-balancing IDLE; gate teacher quality before dumping.
+- **Re-run scope:** nb 04 must be re-run to regenerate the JSONL with the
+  relabel (no SAC retrain needed — reuse the pickle via § 4b).
+
 ### 2026-05-14 — Project-wide code review + 22 fixes [LOCAL]
 - **Scope:** end-to-end review of `src/*.py`, `configs/experiment.yaml`,
   and notebooks 01 / 04 / 05 / 06 / 07 ahead of the Phase 3 RL run.
