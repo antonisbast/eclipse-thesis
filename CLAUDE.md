@@ -56,6 +56,7 @@ eclipse-thesis/
 │   └── _env_helpers.py
 ├── notebooks/             ← narrative + small-scale demos, run LOCALLY on CPU or COLAB GPU
 │   ├── 01_env_setup.ipynb           ← env setup, RBC/SAC baselines, KPI evaluation (Phase 1)
+│   ├── 01_5_bin_design.ipynb        ← state discretisation + representation design (bucket thresholds, raw vs bucketed fields)
 │   ├── 02_llm_policy.ipynb          ← dual-agent LLM-as-policy, remote APIs (Phase 2)
 │   ├── 03_slm_colab.ipynb           ← local SLM inference on Colab GPU (Phase 2)
 │   ├── 04_sac_distill_dataset.ipynb ← SAC rollout → (state_text, action_token) JSONL [IN PROGRESS]

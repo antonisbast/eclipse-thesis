@@ -22,7 +22,31 @@ from src.env import SEED
 # ── Thresholds ────────────────────────────────────────────────────────────────
 # Bucket labels MUST match the strings in make_minimal_prompt / make_sft_prompt
 # below — the SLM is told these are the only categories it will see.
+#
+# All thresholds are data-driven, derived from the deterministic full-year 2022
+# CityLearn tapes in notebooks/01_5_bin_design.ipynb. The tapes are exogenous
+# and version-independent, so these edges are fixed for the thesis.
 PRICE_PEAK_THRESHOLD: float = 0.30   # $/kWh — above this = PEAK price
+                                     # 5 discrete tariffs {0.21,0.22,0.40,0.50,
+                                     # 0.54}; 0.30 sits in the empty 0.22→0.40
+                                     # gap → zero boundary noise.
+
+# Carbon intensity terciles (kgCO₂/kWh). The full-year tape is a bell curve over
+# 0.07–0.28; the old 0.12/0.25 edges left MID swallowing 84 % of steps. These
+# tercile edges give ~34/33/33 % LOW/MID/HIGH so every bin is informative.
+CARBON_MID_THRESHOLD:  float = 0.14  # LOW | MID  edge
+CARBON_HIGH_THRESHOLD: float = 0.17  # MID | HIGH edge
+
+# Solar discretisation operates on the capacity factor that snapshot_state
+# emits — the raw W/kW tape divided by 1000, i.e. generation as a fraction of
+# nameplate (standard-test-condition) output, in [0, ~1]. This is a
+# calibration-free scale: the thresholds are absolute numbers needing no
+# per-building data, so they apply to any building or dataset (like the price
+# thresholds). Edges are the daytime (>0) terciles of the pooled full-year
+# tape, splitting daylight into ~equal-mass LOW/MID/HIGH; NONE covers the
+# ~51 % of night/zero steps.
+SOLAR_LOW_THRESHOLD:  float = 0.17   # LOW | MID  edge (daytime tercile)
+SOLAR_HIGH_THRESHOLD: float = 0.50   # MID | HIGH edge (daytime tercile)
 
 
 def price_bucket(v: float | None) -> str:
@@ -34,20 +58,28 @@ def price_bucket(v: float | None) -> str:
 def carbon_bucket(v: float | None) -> str:
     if v is None:
         return "?"
-    if v < 0.12:
+    if v < CARBON_MID_THRESHOLD:
         return "LOW"
-    if v < 0.25:
+    if v < CARBON_HIGH_THRESHOLD:
         return "MID"
     return "HIGH"
 
 
 def solar_bucket(v: float | None) -> str:
+    """Bucket the solar capacity factor into NONE / LOW / MID / HIGH.
+
+    Expects the value emitted by `snapshot_state` — the raw W/kW tape divided
+    by 1000, i.e. generation as a fraction of nameplate output, in [0, ~1]. Do
+    NOT pass the raw W/kW capacity factor or kWh here.
+    """
     if v is None:
         return "?"
     if v <= 0.0:
         return "NONE"
-    if v < 0.5:
+    if v < SOLAR_LOW_THRESHOLD:
         return "LOW"
+    if v < SOLAR_HIGH_THRESHOLD:
+        return "MID"
     return "HIGH"
 
 
@@ -68,10 +100,12 @@ def render_state(snap: list[dict]) -> str:
     prc = d0.get("electricity_pricing", None)
     crb = d0.get("carbon_intensity", None)
 
+    # price/carbon are shown as the bucket label only — the raw value is the
+    # continuous number the discretisation deliberately abstracts away, and
+    # showing it would invite the SLM to reason about it. See nb 01.5 § 7.
     header = (
         f"Month {d0.get('month', '?')}, {day_names[day]} {hour:02d}:00  |  "
-        f"price={prc:.3f} ({price_bucket(prc)})  |  "
-        f"carbon={crb:.3f} ({carbon_bucket(crb)})"
+        f"price={price_bucket(prc)}  |  carbon={carbon_bucket(crb)}"
     )
 
     # Forecast fields are intentionally omitted — see note in src/env.py.
@@ -139,7 +173,7 @@ CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISC
 [State]
 - 'price' (LOW / PEAK): how expensive grid electricity is now.
 - 'carbon' (LOW / MID / HIGH): how dirty grid electricity is now.
-- 'solar' (NONE / LOW / HIGH): the building's solar generation now.
+- 'solar' (NONE / LOW / MID / HIGH): the building's solar generation now.
 - 'load' (kWh): the building's electricity demand now.
 - 'SoC' (%): how full the battery is. 0% empty, 100% full.
 - 'last_net' (kWh): grid draw last step — your feedback signal.

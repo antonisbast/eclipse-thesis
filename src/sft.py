@@ -163,7 +163,7 @@ CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISC
 [State]
 - 'price' (LOW / PEAK): how expensive grid electricity is now.
 - 'carbon' (LOW / MID / HIGH): how dirty grid electricity is now.
-- 'solar' (NONE / LOW / HIGH): the building's solar generation now.
+- 'solar' (NONE / LOW / MID / HIGH): the building's solar generation now.
 - 'load' (kWh): the building's electricity demand now.
 - 'SoC' (%): how full the battery is. 0% empty, 100% full.
 - 'last_net' (kWh): grid draw last step — your feedback signal.
@@ -230,6 +230,109 @@ def filter_uninformative_rows(
         if noop < len(socs):
             kept.append(row)
     return kept
+
+
+# ── Class rebalancing (imbalanced distillation dataset) ───────────────────
+
+_RESPONSE_TOKEN_RE = re.compile(
+    r"<action\s+building\s*=\s*\d+\s*>\s*([A-Z]+(?:_\d+)?)\s*</action>",
+    re.IGNORECASE,
+)
+
+
+def token_counts(rows: list[dict]) -> "dict[str, int]":
+    """Count action tokens across the `response` field of every row.
+
+    Parses the verbatim assistant response (post-relabel, post-filter), so the
+    counts are exactly what cross-entropy will see at SFT time.
+    """
+    from collections import Counter
+
+    c: Counter = Counter()
+    for row in rows:
+        c.update(t.upper() for t in _RESPONSE_TOKEN_RE.findall(row.get("response", "")))
+    return dict(c)
+
+
+def rebalance_rows(
+    rows: list[dict],
+    *,
+    beta: float = 2.0,
+    floor: float = 0.25,
+    target_size: int | None = None,
+    seed: int = 42,
+) -> list[dict]:
+    """Resample an imbalanced distillation dataset so the dominant action
+    token (IDLE) no longer drowns out the actual control actions.
+
+    The SAC-distill JSONL is severely skewed — IDLE alone is ~48 % of all
+    action tokens after `filter_uninformative_rows`. Behaviour cloning with
+    greedy decoding on such a marginal collapses: the student minimises loss
+    by emitting IDLE for (almost) every state (measured: 98.6 % IDLE at
+    eval). Rebalancing flattens that marginal so no single token is left for
+    greedy decoding to collapse onto.
+
+    The action *vocabulary* is left fully intact — every token, including
+    ones the SAC teacher never used (CHARGE_100, …), stays available to the
+    SLM for zero-shot and for the Phase-3 RL stage. We change only how often
+    each row is *seen* during SFT.
+
+    Each row is weighted by how many *informative* (non-IDLE) action tokens
+    it carries, raised to `beta`::
+
+        n_info(row) = #{ action tokens in row.response that are not IDLE }
+        W(row)      = (floor + n_info(row)) ** beta
+
+    Rows are drawn WITH REPLACEMENT in proportion to ``W(row)``. IDLE-only
+    rows are heavily down-sampled; rows where the teacher actively cycles
+    several batteries are up-sampled. On the SAC-distill JSONL the default
+    (beta=2) pulls IDLE from ~48 % of all tokens to ~24 %, with every other
+    token in the 10–25 % band.
+
+    Why not per-token inverse-frequency weighting? Each row carries
+    `n_buildings` *coupled* tokens — an IDLE-heavy row that happens to hold
+    one rare token still drags the other IDLE labels along. Per-token
+    inverse-frequency barely moves the marginal (measured: 48 % → 41 %).
+    Counting informative tokens per row and weighting super-linearly
+    (`beta` > 1) is what actually flattens the distribution.
+
+    Args:
+        rows:        Distillation rows (already filtered). Each must have a
+                     `response` field with `<action building=...>` tags.
+        beta:        Rebalancing strength. 1.0 = linear in n_info; 2.0
+                     (default) pulls IDLE to ~24 %; higher values concentrate
+                     harder on multi-action rows at the cost of row diversity
+                     (more duplication → mild overfitting risk).
+        floor:       Small positive offset so all-IDLE rows keep a tiny but
+                     non-zero chance of being sampled — the model must still
+                     see when idling is correct.
+        target_size: Number of rows to draw. Defaults to ``len(rows)`` — the
+                     dataset keeps its size, only its composition changes.
+        seed:        RNG seed for reproducible resampling.
+
+    Returns:
+        A new list of rows (references reused; rows may repeat). Resample
+        the TRAIN split ONLY — never the held-out eval split, or duplicated
+        rows leak across the split and contaminate ``eval_loss``.
+    """
+    if not rows:
+        return rows
+    if beta < 0:
+        raise ValueError(f"beta must be non-negative, got {beta}")
+    if floor <= 0:
+        raise ValueError(f"floor must be positive, got {floor}")
+
+    row_w = np.empty(len(rows), dtype=float)
+    for i, row in enumerate(rows):
+        toks   = [t.upper() for t in _RESPONSE_TOKEN_RE.findall(row.get("response", ""))]
+        n_info = sum(t != "IDLE" for t in toks)
+        row_w[i] = (floor + n_info) ** beta
+    row_w /= row_w.sum()
+
+    rng  = np.random.default_rng(seed)
+    n    = target_size if target_size is not None else len(rows)
+    idx  = rng.choice(len(rows), size=n, replace=True, p=row_w)
+    return [rows[i] for i in idx]
 
 
 # ── Trajectory dumper ─────────────────────────────────────────────────────

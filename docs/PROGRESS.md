@@ -21,6 +21,140 @@
 
 ## Log
 
+### 2026-05-16 — State discretisation & representation design [LOCAL]
+- **New notebook `notebooks/01_5_bin_design.ipynb`** — a design document, framed
+  as a fresh derivation (not a corrections pass): it analyses the deterministic
+  full-year CityLearn 2022 state tapes (price / carbon / solar), derives the
+  categorical bucket thresholds from the distributions with histograms, verifies
+  every bin is non-degenerate, and (§ 7) documents the wider state
+  representation. Cells stay thin: env + bucket fns imported from `src/`. The
+  price/carbon/solar tapes are exogenous and deterministic, so the thresholds
+  are version-independent (analysis run under citylearn 2.5.0; bin design is
+  unaffected — project still pins 2.6.0b2).
+- **Why:** the SLM never sees raw floats, only `price=PEAK` / `carbon=MID` /
+  `solar=HIGH`. A prior review flagged 3 of the 4 buckets as degenerate — a
+  label absorbing ~all the mass means the SLM loses that feature entirely.
+- **PRICE — kept unchanged.** `LOW/PEAK` @ 0.30 $/kWh. The tariff is 5 discrete
+  levels {0.21,0.22,0.40,0.50,0.54}; 0.30 sits in the empty 0.22→0.40 gap (zero
+  boundary noise) and PEAK is 100% deterministic by hour (16:00–19:00). Shares
+  79/21%. Rejected a 3-bin super-peak split: 0.54 is only 5% of the year and
+  appears **only** in Jun–Sep (seasonally confounded), and does not change the
+  optimal action.
+- **CARBON — re-cut `src/agent.py` carbon_bucket 0.12/0.25 → 0.14/0.17.** The
+  carbon tape is a bell curve over 0.07–0.28; old edges left MID at 83.8% and
+  HIGH at 0.9%. New edges are the data terciles (0.139/0.170 rounded) →
+  LOW/MID/HIGH ≈ 34/33/33%, three equal-mass informative bins. Carbon is not
+  redundant with price (corr ≈ +0.31) or hour.
+- **SOLAR — re-scaled to a calibration-free capacity factor + re-bucketed.**
+  `snapshot_state` was emitting the raw `energy_simulation.solar_generation`
+  tape, a **W/kW capacity factor in 0–976**, not a usefully-bucketed quantity;
+  `solar_bucket` then cut it at 0.0/0.5, so the LOW band caught 0.2% and solar
+  collapsed to a broken binary.
+  - **Scale decision (with user, 2 rounds).** The bin threshold must be an
+    *absolute number needing no per-building data* — like the price/carbon
+    thresholds — because RQ2 evaluates the agent on unseen buildings. Three
+    scales were compared in nb 01.5 § 4: actual kWh (needs nameplate power,
+    panel-size-dependent), own-peak capacity factor (`raw ÷ building's own
+    annual peak`; the most uniform distribution but **needs a full year of that
+    building's data** to compute — rejected), and **raw capacity factor**
+    (`raw ÷ 1000`, i.e. fraction of nameplate STC output). The capacity factor
+    needs nothing building-specific, so it was chosen; its ~38% per-building
+    spread is real siting physics, not noise, and no bin is degenerate.
+  - `src/env.py` `snapshot_state` now emits the **capacity factor** =
+    `raw[t] / 1000` in [0, ~1].
+  - `src/agent.py` `solar_bucket` is 4-way `NONE/LOW/MID/HIGH` on that fraction
+    with edges `0 / 0.17 / 0.50` (pooled daytime >0 terciles) → ≈ 51/16/16/16%
+    of all steps. No bin degenerate per building (HIGH share B3≈10%..B0≈21%).
+- **render_state header — price/carbon shown as label only (with user).**
+  The header was `price=0.220 (LOW) | carbon=0.243 (HIGH)`; it is now
+  `price=LOW | carbon=HIGH`. The raw value is the continuous number the
+  discretisation deliberately abstracts away — showing it invites the SLM to
+  reason about it and is inconsistent with solar (already label-only).
+- **Prompt updates:** the `[State]` solar line in `make_minimal_prompt`
+  (`src/agent.py`) and `make_sft_prompt` (`src/sft.py`) now reads
+  `solar (NONE / LOW / MID / HIGH)` to match the new bucket. Carbon line already
+  said `LOW / MID / HIGH`; price line already `LOW / PEAK` — both unchanged.
+- **`sandbox/analyze_distill_dataset.py`** — header/building regexes updated to
+  the new render_state format (label-only header, 4-way solar); auto-picks the
+  newest JSONL; raises a clear message on a stale (pre-change) JSONL.
+- **STATE REPRESENTATION — nb 01.5 § 7.** Added a section documenting the full
+  state path (`CityLearn obs → snapshot_state → render_state → prompt`) and
+  evaluating whether the raw-numeric fields should also be bucketed. Decision:
+  **keep `SoC` / `load` / `last_net` raw.** Principle — bucket the *exogenous
+  context* that selects a strategy (price/carbon/solar); keep the *energy-state
+  quantities* the action is quantitatively sized against as raw numbers on
+  their shared %/kWh scale. SoC needs precision for the safety bounds and is
+  endogenous (no stable distribution to fit bins to); load is per-building, so a
+  global load bin would reintroduce the building-dependence problem solved for
+  solar; last_net is endogenous feedback. A fully-categorical state is noted as
+  a possible thesis ablation. No `render_state` change.
+- **ACTION-TOKEN bins — methodology only, thresholds deferred.** nb 01.5 § 5
+  fixes the methodology (data-quantile edges on the teacher's non-idle |a|) but
+  leaves `action_to_token` on its uniform 20% steps: final edges must come from
+  the teacher rollout actually distilled, and SAC is still being retrained.
+  Note: the latest distill JSONL spans the full ±1.0 action range — the earlier
+  ±0.5 `action_scaling` cap concern does NOT apply to it. Provisional quantile
+  edges are shown in the notebook as a preview only.
+- **Side effect:** `policy_rbc` (`src/agent.py`) keys off `solar_bucket(...) ==
+  "HIGH"`; with the new 4-way bucket, "HIGH" now means strong sun (capacity
+  factor ≥ 0.50, ~16% of steps) rather than the old "any daylight" (~49%). The
+  RBC still works and the new trigger is arguably more sensible (charge only on
+  real surplus), but the RBC baseline KPIs would shift if re-run.
+- **Re-run scope:** nb 04 should be re-run to regenerate the distillation JSONL
+  with the new solar capacity factor + 4-way bucket + label-only header in the
+  rendered state (no SAC retrain needed for the bin change itself — reuse the
+  pickle). The existing JSONL files use the old header format. nb 02/03
+  zero-shot results would also shift if re-run (new solar/carbon labels in the
+  prompt), but those are completed experiments.
+
+### 2026-05-16 — SFT always-IDLE collapse diagnosed + class rebalancing [LOCAL]
+- **Symptom:** the v6 SFT run (1 epoch, ~2× faster) produced a degenerate
+  always-IDLE policy. nb 06 generalisation eval: the SFT model emits IDLE
+  98.6 % of the time on unseen buildings → every KPI exactly 1.0000
+  (identical to No-Control), strictly worse than the un-finetuned base
+  Gemma (Δ Phase I = +0.725). nb 05's own § 15 trace already showed
+  all-IDLE — the trained adapter itself is degenerate, not an nb 06
+  loading bug.
+- **Root cause is NOT the teacher.** The SAC teacher is fine — near-SOTA,
+  smooth small actions (mean|a|=0.236, all within ±0.5), which is exactly
+  what a good battery controller looks like. The bug is the distillation
+  data *balance*: post-`filter_uninformative_rows` the action-token mix is
+  IDLE 48.3 %, DISCHARGE_20 18.3 %, CHARGE_20 14.9 %, CHARGE_40 11.2 %,
+  DISCHARGE_40 7.3 %. Behaviour cloning + greedy decoding on a 48 %-IDLE
+  marginal collapses to the majority token. Training metrics confirm it:
+  train loss ~0.005 is misleading (dominated by deterministic
+  `<action building=N>` boilerplate that completion-only loss also
+  supervises); the real signal — eval loss — is flat at ~0.19 from
+  step 200, i.e. no state→action mapping was learned, only the marginal.
+- **The no-op relabel (2026-05-15) did not fix the imbalance, it moved
+  it:** raw IDLE is 70.6 %, mostly *relabelled* clipped discharges; the
+  old degenerate mode (always DISCHARGE_20) simply became always-IDLE.
+- **Fix — `src/sft.py`:** added `token_counts()` and `rebalance_rows()`.
+  `rebalance_rows` resamples TRAIN rows with replacement in proportion to
+  `(0.25 + #non-IDLE actions)**2` (super-linear in informative content).
+  Pulls IDLE 48 %→24 % with no token above ~25 %, operating on the
+  existing JSONL — no SAC retrain, no nb 04 re-run. Per-token
+  inverse-frequency weighting was tried and rejected (only 48 %→41 %:
+  the 3 tokens in a row are coupled, so IDLE-heavy rows ride along). The
+  11-token action vocabulary is left fully intact — the SLM keeps every
+  action available for zero-shot and the Phase-3 RL stage.
+- **Fix — nb 05:** § 3 now splits train/eval BEFORE rebalancing (the eval
+  split stays clean and non-resampled) and rebalances only the train
+  split; § 5 builds `train_ds`/`eval_ds` from those lists; § 7 gained a
+  **collapse gate** — after training it generates on 40 held-out states
+  and hard-asserts the top action token is < 85 %, catching a degenerate
+  run in ~5 min instead of after a full rollout + nb 06. § 12 now
+  `rm -rf`s the stale adapter before copying (a re-run otherwise nests
+  `sft_adaptersV6/lora_adapter/lora_adapter` and nb 06 loads stale
+  weights).
+- **Re-run scope:** nb 05 — required (run top-to-bottom; no SAC / nb 04
+  re-run). nb 06 — required afterwards; it picks up the new adapter from
+  `sft_adaptersV6/lora_adapter` with no changes needed.
+- **Caveat / still open:** rebalancing removes the *collapse*. Whether the
+  resulting policy is actually *good* depends on whether the text-rendered
+  state carries the signal SAC used — the collapse gate's post-train token
+  mix and the nb 06 KPIs will tell.
+
 ### 2026-05-15 — SFT dataset diagnosis + no-op relabel [LOCAL]
 - **Why the SFT distillation gave bad results:** ~50 % of all labels in the
   SAC-distill JSONL were physical no-ops. 77 % of the teacher's DISCHARGE

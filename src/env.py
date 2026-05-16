@@ -270,13 +270,23 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
         # read those with index t-1 and clamp per-array via _at().
         t = env.time_step
 
+        # solar_generation: the raw tape is a W/kW capacity factor. Dividing by
+        # 1000 expresses it as the capacity factor — generation as a fraction
+        # of nameplate (standard-test-condition) output, in [0, ~1]. This is a
+        # calibration-free scale: it needs no per-building data, so the
+        # solar_bucket thresholds are absolute numbers that apply to any
+        # building or dataset, exactly like the absolute price thresholds.
+        # Per-building panel orientation still shifts the distribution — a real
+        # physical difference, not noise. See notebooks/01_5_bin_design.ipynb.
+        solar_cf = float(_at(b.energy_simulation.solar_generation, t)) / 1000.0
+
         out.append({
             "month":                            int(_at(b.energy_simulation.month, t)),
             "day_type":                         int(_at(b.energy_simulation.day_type, t)),
             "hour":                             int(_at(b.energy_simulation.hour, t)),
             "electricity_pricing":              float(_at(b.pricing.electricity_pricing, t)),
             "carbon_intensity":                 float(_at(b.carbon_intensity.carbon_intensity, t)),
-            "solar_generation":                 float(_at(b.energy_simulation.solar_generation, t)),
+            "solar_generation":                 solar_cf,
             "non_shiftable_load":               float(_at(b.non_shiftable_load, t)),
             "electrical_storage_soc":           float(_at(b.electrical_storage.soc, t - 1)),
             "net_electricity_consumption_last": float(_at(b.net_electricity_consumption, t - 1)) if t > 0 else 0.0,

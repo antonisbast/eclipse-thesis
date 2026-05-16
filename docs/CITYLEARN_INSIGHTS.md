@@ -23,7 +23,7 @@ This document summarizes critical mechanics, bugs, and best practices for develo
 - **`electrical_storage_soc`**: State of Charge. Range: [0.0, 1.0] (0% to 100%).
 
 ## 3. Solar Generation (PV) Mechanics
-- **Irradiance, not kWh**: The `solar_generation` observation provides raw solar irradiance (W/m²), not directly usable energy in kWh. High values (e.g., >100) mean strong sun.
+- **Raw tape is a capacity factor, not kWh**: The raw `energy_simulation.solar_generation` tape is a W/kW capacity factor (range 0–976), **not** usable energy. `snapshot_state` emits the **capacity factor** = `raw / 1000` — generation as a fraction of nameplate (standard-test-condition) output, in [0, ~1]. The /1000 reference is universal, so the `solar_bucket` thresholds are absolute numbers needing no per-building calibration — they apply to any building or dataset, like the price/carbon thresholds. (Per-building panel orientation/shading still shifts the distribution ~38%; that is real physics, not noise.) See `notebooks/01_5_bin_design.ipynb` for the scale comparison and why own-peak normalisation was rejected.
 - **Energy Balancing**: Solar energy first covers the building's `non_shiftable_load`. Any remaining energy is used to charge the battery (if a charge action is applied). Any final excess is automatically exported to the grid.
 - **Strategy**: To prevent unnecessary grid exports, use small charge actions during high solar generation hours to capture the free energy.
 
@@ -61,8 +61,9 @@ Charge and discharge are **roughly symmetric**. Measured on `citylearn_challenge
 - **Best Practice — SoC bounds:** Charging at SoC ≥ 0.95 wastes the request (clipped by ceiling); discharging at SoC ≤ 0.05 likewise. Hard-clip in the action parser rather than relying on the LLM to obey "never charge above 90%".
 
 ## 5. LLM Agent Prompting Strategy (Categorical Binning)
-Instead of feeding raw continuous numbers to an LLM agent, discretizing key exogenous variables drastically improves reasoning:
-- **Electricity Price**: `LOW` vs `PEAK`.
-- **Carbon Intensity**: `LOW`, `MID`, `HIGH`, `PEAK`.
-- **Solar Generation**: `NONE`, `LOW`, `HIGH`.
-- **Rationale**: This allows the prompt to state simple categorical rules (e.g., "If price is PEAK and SoC is high, discharge aggressively (−0.6 to −1.0). If price is LOW, trickle charge (+0.2).") which LLMs follow much more reliably than continuous numerical thresholds.
+Instead of feeding raw continuous numbers to an LLM agent, discretizing key exogenous variables drastically improves reasoning. Thresholds are data-driven from the deterministic full-year 2022 tape — see `notebooks/01_5_bin_design.ipynb` for the derivation and justification:
+- **Electricity Price**: `LOW` vs `PEAK`, split at 0.30 $/kWh (the empty gap in the 5-level discrete tariff). ~79 / 21 %.
+- **Carbon Intensity**: `LOW` / `MID` / `HIGH`, terciles at 0.14 / 0.17 kgCO₂/kWh. ~34 / 33 / 33 %.
+- **Solar Generation**: `NONE` / `LOW` / `MID` / `HIGH`, on the capacity factor (`raw / 1000`), edges 0 / 0.17 / 0.50 (pooled daytime terciles). ~51 / 16 / 16 / 16 %.
+- **Rendering**: price, carbon and solar appear in the prompt as the bucket **label only** (`price=LOW`, not `price=0.220 (LOW)`) — the raw number is the continuous value the discretisation deliberately abstracts away. `SoC`, `load` and `last_net` are instead shown as raw numbers: they are energy-state quantities the action is quantitatively sized against (see nb 01.5 § 7).
+- **Rationale**: This allows the prompt to state simple categorical rules (e.g., "If price is PEAK and SoC is high, discharge aggressively (−0.6 to −1.0). If price is LOW, trickle charge (+0.2).") which LLMs follow much more reliably than continuous numerical thresholds. Equal-mass bins ensure every label is actually seen — a bin that absorbs ~all the mass carries no signal.
