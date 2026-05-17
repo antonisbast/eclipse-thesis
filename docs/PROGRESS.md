@@ -21,6 +21,24 @@
 
 ## Log
 
+### 2026-05-17 — Removed the secondary reward function — MERLIN only [LOCAL]
+- **Deleted `EcoPeakBatteryReward`** (normalised cost+carbon+peak multi-objective
+  reward) from `src/env.py`, the nb 01 inline copy, and the nb 03 import.
+  `MERLINReward` is now the project's single reward function.
+- **Removed the `reward_fn` parameter entirely** — it had only one valid value
+  left. Dropped from `make_env` (`src/env.py`), `run_policy` /
+  `run_policy_dual_agent` / `_default_env_factory` (`src/rollout.py`), the
+  `env:` block of `configs/experiment.yaml`, and every notebook call site
+  (01, 01.5, 02, 03, 04, 05, 06). nb 04's `REWARD_FN` constant is gone;
+  distillation artifacts keep the `sac_merlin_*` filename prefix.
+- **nb 01:** dropped the SAC (Eco) baseline experiment (training cell + the
+  SAC (Eco) rows in the §5 / §6 comparison tables) and the
+  `W_COST/W_CARBON/W_PEAK/MAX_PRICE/MAX_CARBON/MAX_NET_LOAD` config block.
+- **Docs scrubbed:** CONTEXT, STATUS_FOR_RL_HANDOFF, notebook_01_env_setup
+  (§4 rewritten to MERLIN-only, §10 "MERLIN Reward Comparison" removed and
+  later sections renumbered), THESIS_STATUS, CLAUDE.md; review items #4 and
+  #23 in REVIEW_2026-05-14 marked obsolete.
+
 ### 2026-05-17 — MERLINReward now price-weighted (true paper formula) [LOCAL]
 - **`MERLINReward.calculate` (`src/env.py`) — cost term now includes the tariff.**
   Previously the cost signal was raw `|net_electricity_consumption|` (kWh); the
@@ -43,9 +61,8 @@
   error and minor issues. Fixes:
 - **§ 3 carbon — wrong reward cited (the real error).** The decision text
   justified the carbon bin with "the reward weights cost and carbon 0.4/0.4" —
-  those are `EcoPeakBatteryReward`'s weights, but the SAC teacher / distillation
-  use `MERLINReward` at `w1=1, w2=0`, which optimises net consumption only and
-  weights neither carbon nor price. Rewrote § 3 with the correct reward and an
+  but the SAC teacher / distillation use `MERLINReward` at `w1=1, w2=0`, which
+  optimises net consumption only and weights neither carbon nor price. Rewrote § 3 with the correct reward and an
   honest **supervision caveat**: under a MERLIN teacher the carbon (and price)
   buckets get little direct BC supervision — they earn their slot via zero-shot
   prompting, a Phase-3 RL reward, and the carbon-emissions KPI, not via the
@@ -273,10 +290,6 @@
     `end=t0+WINDOW_STEPS-1` (CityLearn end is inclusive).
   - **nb 01 SIM_END 8758→8759** (#11): one step short of a year; aligned
     with `src/env.py`.
-  - **nb 01 EcoPeakBatteryReward** (#4, #23): inline copy diverged from
-    `src/env.py` (penalised exports). Both copies now use a
-    **district-level** peak term (sum first, then square, clamped
-    non-negative), distributed across buildings.
   - **ZNE column validation** (#15): `src.eval.zne_metric` now raises
     `KeyError` if expected CityLearn columns are missing rather than
     silently defaulting `imp = 1.0`.
@@ -309,8 +322,8 @@
   - nb 05 — required (N_BUILDINGS=3 fundamental fix).
   - nb 06 — required (was crashing).
   - nb 07 — not yet run; use fixed version.
-  - nb 01 — optional (SIM_END off-by-one and eco-reward fix shift Phase I
-    by <10⁻³; only retrain for bit-exact match).
+  - nb 01 — optional (SIM_END off-by-one shifts Phase I by <10⁻³; only
+    retrain for bit-exact match).
 
 ### 2026-05-13 — Colab CityLearn-version fixes + SAC distillation dataset pushed [LOCAL]
 - Aligned `WEEK_START = 3624` across nb 02 and nb 03 (nb 03 had 2624) so remote-API and local-SLM zero-shot results are on the same window for direct comparison.
@@ -542,8 +555,8 @@
 
 ### 2026-05-04 — src/ modules + 02_llm_policy notebook [LOCAL]
 - Populated `src/env.py`:
-  - `MERLINReward`, `EcoPeakBatteryReward` (extracted from 01 notebook)
-  - `make_env()` — supports `start`/`end` windowing, `obs_set` (`sac`=13 vars, `llm`=9 vars), `reward_fn`
+  - `MERLINReward` (extracted from 01 notebook)
+  - `make_env()` — supports `start`/`end` windowing, `obs_set` (`sac`=13 vars, `llm`=9 vars)
   - `snapshot_state()` — bypasses obs-vector SoC bug by reading building objects directly
   - `OBSERVATIONS_SAC` (13 vars, with forecasts) and `OBSERVATIONS_LLM` (9 real-time, no forecasts)
   - Absolute `DATASET_ROOT` via `Path(__file__).parent.parent` — importable from any notebook

@@ -12,17 +12,16 @@
 1. [Dataset & Environment](#1-dataset--environment)
 2. [Observation Space](#2-observation-space)
 3. [Action Space](#3-action-space)
-4. [Reward Functions](#4-reward-functions)
+4. [Reward Function](#4-reward-function)
 5. [Baseline Agents](#5-baseline-agents)
 6. [KPI System & Challenge Scoring](#6-kpi-system--challenge-scoring)
 7. [70% Validation Gate](#7-70-validation-gate)
 8. [ZNE Metric (MERLIN)](#8-zne-metric-merlin)
 9. [Generalisation Section](#9-generalisation-section)
-10. [MERLIN Reward Comparison](#10-merlin-reward-comparison)
-11. [Key API Patterns](#11-key-api-patterns)
-12. [Gotchas & Hard-Won Lessons](#12-gotchas--hard-won-lessons)
-13. [Numerical Results (reference)](#13-numerical-results-reference)
-14. [References](#14-references)
+10. [Key API Patterns](#10-key-api-patterns)
+11. [Gotchas & Hard-Won Lessons](#11-gotchas--hard-won-lessons)
+12. [Numerical Results (reference)](#12-numerical-results-reference)
+13. [References](#13-references)
 
 ---
 
@@ -148,59 +147,13 @@ HVAC and DHW actuators are set to `inactive_actions` in the schema. The 2022 bui
 
 ---
 
-## 4. Reward Functions
+## 4. Reward Function
 
-Two reward classes are defined in the `env-factory` cell, selectable via `make_env(reward_fn=...)`.
-
----
-
-### 4.1 EcoPeakBatteryReward — thesis primary reward (`reward_fn='eco'`)
-
-**Formula (per building, per timestep):**
-```
-norm_price  = electricity_pricing         / MAX_PRICE      ∈ [0, 1]
-norm_carbon = carbon_intensity            / MAX_CARBON     ∈ [0, 1]
-norm_net    = net_electricity_consumption / MAX_NET_LOAD   ∈ [-1, 1]
-
-eco_signal  = w_cost * norm_price + w_carbon * norm_carbon    ∈ [0, ~0.8]
-cost        = norm_net * eco_signal
-
-base_penalty = -(1 + sign(cost) * SoC) * |cost|
-peak_penalty = -(norm_net²) * w_peak
-
-reward = base_penalty + peak_penalty   ∈ [~-1.8, 0]
-```
-
-**Default weights:** `w_cost=0.4, w_carbon=0.4, w_peak=0.2`
-
-**Normalisation constants (measured from full 2022 dataset, all 17 buildings, full year):**
-
-| Constant | Value | Source |
-|---|---|---|
-| `MAX_PRICE` | **0.54** EUR/kWh | Exact max of 5 discrete tariff levels: {0.21, 0.22, 0.40, 0.50, 0.54} |
-| `MAX_CARBON` | **0.30** kgCO₂/kWh | Observed max = 0.282; +6% headroom |
-| `MAX_NET_LOAD` | **10.0** kWh/step | Per-building (reward called per-building, NOT per-district); observed max = 8.51 kWh (Building_17); +18% headroom |
-
-**Why these constants matter:**  
-Without normalisation the quadratic peak term dominates by ~50×. Using a district-level MAX_NET_LOAD (e.g., 20 kWh) causes the peak penalty to be ≈0 because per-building consumption never reaches it — the reward becomes purely `base_penalty` and the weight system is meaningless. The constants must be **per-building**.
-
-**Reward scaling sanity check (mid-peak operating point):**
-At 5 kWh net load, price=0.50, carbon=0.20, SoC=0.5:
-- base penalty ≈ -0.48 (~90% of total)
-- peak penalty ≈ -0.05 (~10% of total)
-- total ≈ -0.53
-
-**SoC amplification logic:**
-- `sign(cost) * SoC` amplifies the penalty when importing at high eco-price with a full battery (agent should have discharged but didn't → strong negative signal).
-- Reduces penalty when forced to import at low SoC (unavoidable → weaker signal).
-- This gives SAC a gradient to learn discharge timing that matches tariff windows.
-
-**Design decision rationale:**  
-CityLearn's default reward `−max(net_consumption, 0)` causes a lazy-discharge trap: the agent drains the battery in the first few hours and then sits idle because any discharge immediately removes the penalty regardless of timing. The SoC-amplified eco-signal forces the agent to hold charge for high-price windows.
+`MERLINReward` is the project's reward function — applied by `make_env()` and defined in the `env-factory` cell (kept byte-for-byte in sync with `src/env.py`).
 
 ---
 
-### 4.2 MERLINReward — alternative reward for comparison (`reward_fn='merlin'`)
+### MERLINReward
 
 From Nweye et al. (2024), formula (per building):
 ```
@@ -216,17 +169,15 @@ reward = p * signal
 
 Collapses to: `reward = -(1 + sign(net) * SoC) * |net_consumption|`
 
-**Key differences from EcoPeakBatteryReward:**
+Uses raw kWh values — no dataset-specific normalisation constants required. Selected because it is simple, published, and dataset-agnostic.
 
-| | EcoPeakBatteryReward | MERLINReward |
-|---|---|---|
-| Normalisation | Yes (dataset-measured maxima) | No (raw kWh) |
-| Carbon signal | Weighted into every step | Disabled (w2=0 in optimum) |
-| Peak shaving | Explicit quadratic term | None |
-| Reward scale | ~[-1.8, 0] always | Tracks actual consumption; varies by building |
-| Reported result | — | Phase I = 0.815 (10 ep, EXTENDED_OBSERVATIONS) |
+**SoC amplification logic:**
+- `sign(net) * SoC` amplifies the penalty when importing with a full battery (agent should have discharged but didn't → strong negative signal).
+- Reduces the penalty when forced to import at low SoC (unavoidable → weaker signal).
+- This gives SAC a gradient to learn discharge timing that matches tariff windows.
 
-**When to use MERLINReward:** As a comparison baseline to check if our normalised multi-objective reward actually outperforms MERLIN's simpler formulation. For fair comparison, use equal episodes and `EXTENDED_OBSERVATIONS` (as MERLIN did).
+**Design decision rationale:**  
+CityLearn's default reward `−max(net_consumption, 0)` causes a lazy-discharge trap: the agent drains the battery in the first few hours and then sits idle because any discharge immediately removes the penalty regardless of timing. The SoC-amplified signal forces the agent to hold charge for high-price windows.
 
 ---
 
@@ -249,7 +200,7 @@ No price or carbon awareness — purely time-based. This makes it interpretable:
 - **Generalises by construction** — same rule applies to any building
 - Single full-year episode takes ~20s on MacBook CPU
 
-**RBC as sanity check:** The two RBC rows in the 2×2 reward comparison (EcoPeak vs MERLIN) should be nearly identical — RBC ignores the reward signal during action selection, so any difference is env-reset noise. Large differences indicate a bug.
+**RBC as sanity check:** RBC ignores the reward signal during action selection, so its KPIs are a stable anchor — re-running it should give near-identical numbers (any difference is env-reset noise). Large differences indicate a bug.
 
 ---
 
@@ -452,37 +403,7 @@ Same `ACTIVE_OBSERVATIONS` list → same raw observation structure (9 dims) → 
 
 ---
 
-## 10. MERLIN Reward Comparison
-
-### Experiment design: 2×2 matrix
-
-|  | EcoPeakBatteryReward (ours) | MERLINReward |
-|---|---|---|
-| **RBC** | `env_rbc` — from §3 | `env_rbc_merlin` — fresh episode |
-| **SAC** | `env_sac` — from §4 | `env_sac_merlin` — full retraining |
-
-- Both SAC runs use `SAC_EPISODES`, same seed, same `ACTIVE_OBSERVATIONS`
-- Only the reward function changes
-- RBC rows should be **identical** (stateless policy) — used as noise floor
-
-### What the comparison isolates
-
-- RBC rows: pure env reset noise (any difference is a bug or rng variation)
-- SAC rows: **reward shaping effect on SAC policy quality** — the policy was trained with a different objective, so genuine KPI differences are expected and meaningful
-
-### Fair comparison requires (not done in this notebook, belongs on Colab)
-- 10 episodes minimum (MERLIN used 10)
-- `EXTENDED_OBSERVATIONS` (MERLIN used price + solar forecasts)
-- Multiple seeds for statistical robustness
-
-### MERLIN's published result (full setup, Nweye et al. 2024)
-- Phase I = **0.815** on 6 training buildings, 2022 dataset
-- Used all 3 price forecast horizons, all 3 solar irradiance horizons
-- SAC with 10 episodes, full-year episodes
-
----
-
-## 11. Key API Patterns
+## 10. Key API Patterns
 
 ### `make_env()` — environment factory
 
@@ -491,12 +412,10 @@ make_env(
     buildings=None,          # list of building indices; defaults to BUILDINGS
     render_mode="end",       # 'end' or 'during'
     session_name=None,       # enables render; creates sub-folder under RENDER_DIR
-    reward_fn="eco",         # 'eco' → EcoPeakBatteryReward, 'merlin' → MERLINReward
-    extended_obs=False,      # True → EXTENDED_OBSERVATIONS (13 vars incl. forecasts)
 )
 ```
 
-Defaults are backward-compatible — all existing call sites work unchanged.
+The env always uses `MERLINReward`. Defaults are backward-compatible — all existing call sites work unchanged.
 
 ### Render mode
 
@@ -522,7 +441,7 @@ For full-year episodes, `terminated=True` at step 8758. `truncated` can also be 
 
 ---
 
-## 12. Gotchas & Hard-Won Lessons
+## 11. Gotchas & Hard-Won Lessons
 
 ### 1. `deterministic=True` crash on SAC
 **Symptom:** `AssertionError` in `sac.py get_normalized_observations()` — `norm_mean is None`  
@@ -535,33 +454,24 @@ For full-year episodes, `terminated=True` at step 8758. `truncated` can also be 
 **Cause:** v1-style names like `district_cost_total` don't exist in `evaluate_v2()`. The v2 names are long ratio strings.  
 **Fix:** Use exact v2 names — see §6.2 above. Always validate with `k in kpi_table.index`.
 
-### 3. MAX_NET_LOAD must be per-building, not per-district
-**Symptom:** Peak penalty ≈ 0, weight W_PEAK=0.2 has no effect  
-**Cause:** Using district total (e.g., 20 kWh for 6 buildings) but `calculate()` is called per-building. Per-building max is ~8.5 kWh, so norm_net ≤ 0.43 and peak penalty = 0.43²×0.2 ≈ 0.037 — essentially zero.  
-**Fix:** `MAX_NET_LOAD = 10.0` (per-building, observed max 8.51 + 18% headroom)
-
-### 4. MAX_PRICE precision
-**Cause:** Dataset has 5 discrete tariff levels: {0.21, 0.22, 0.40, 0.50, **0.54**}. Using 0.50 clips norm_price to 1.08 at the highest tariff, breaking the [0,1] normalisation assumption.  
-**Fix:** `MAX_PRICE = 0.54` (exact dataset maximum)
-
-### 5. RENDER_DIR must be defined before make_env()
+### 3. RENDER_DIR must be defined before make_env()
 **Symptom:** `NameError: RENDER_DIR` inside `make_env()` even with try/except, because the except block also references `RENDER_DIR`  
 **Fix:** Define `RENDER_DIR` in the env-factory cell, before `make_env()` is defined. Never split the definition into a later cell.
 
-### 6. Schema caching across env instances
+### 4. Schema caching across env instances
 **Symptom:** Second `make_env()` call uses patched schema from first call, but then a third mutates it — inconsistent `root_directory`  
 **Fix:** Always call `load_schema()` inside `make_env()` to get a fresh dict per instance. Never pass the same schema dict to two `CityLearnEnv()` calls.
 
-### 7. `evaluate_v2()` only available in v2.6.0b2+
+### 5. `evaluate_v2()` only available in v2.6.0b2+
 **Symptom:** `AttributeError: 'CityLearnEnv' object has no attribute 'evaluate_v2'`  
 **Fix:** Use the project's `.venv312` (Python 3.12) which has CityLearn 2.6.0b2. The system Python has v2.5.0.
 
-### 8. RBC's `learn(episodes=1)` vs manual rollout
+### 6. RBC's `learn(episodes=1)` vs manual rollout
 `BasicBatteryRBC.learn(episodes=1)` internally runs the full episode and populates the env's internal episode buffer. After it returns, `env.evaluate_v2()` is valid. For SAC on unseen buildings, do **not** call `learn()` — use the manual `predict` + `step` loop to avoid resetting the trained policy's internal state.
 
 ---
 
-## 13. Numerical Results (reference)
+## 12. Numerical Results (reference)
 
 These are indicative results from 5-episode SAC runs on MacBook CPU. Numbers will improve with more episodes on GPU.
 
@@ -589,7 +499,7 @@ These are indicative results from 5-episode SAC runs on MacBook CPU. Numbers wil
 
 ---
 
-## 14. References
+## 13. References
 
 1. **2022 CityLearn Challenge paper:**  
    Vazquez-Canteli, J.R. et al. (2022). *CityLearn Challenge 2022*. Challenge paper and evaluation appendix (Appendix A defines C, G, R, 1-L, D, Phase I, Combined formulas).

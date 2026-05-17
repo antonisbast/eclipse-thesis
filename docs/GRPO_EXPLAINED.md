@@ -325,15 +325,26 @@ reference policy still produces well-structured completions
 
 ### 8.4 CoT collapse
 **What it looks like:** `<thought>` blocks become empty, single-token, or
-clearly degenerate ("ok ok ok").
+clearly degenerate ("ok ok ok"). In notebook 07 this shows up as the
+§ 11 CoT-health plot: thought-presence rate drifting down or mean
+thought length shrinking toward `COT_MIN_WORDS`.
 **What's happening:** Thought tokens are receiving the same advantage as
 action tokens, but they don't *directly* affect reward — so the policy
-learns to spend the minimum probability mass on them. KL term should
+learns to spend the minimum probability mass on them. The KL term should
 catch this if the reference produces non-trivial thoughts.
-**Mitigations:** This is why the notebook recommends a **CoT warm-restart
-SFT** before this notebook if RQ3 (interpretable rationales) matters. If
-the SFT adapter has zero `<thought>` mass, RL cannot conjure it from
-nothing.
+**Prerequisite — the SFT prior must be CoT-capable.** RL cannot conjure
+a `<thought>` block from a prior that has zero `<thought>` mass. The
+chosen pipeline fix is to **re-cure the distillation dataset** (notebook
+04) so each row's `response` includes a `<thought>` rationale (synthesised
+LLM-generated or programmatically), and re-run the SFT (notebook 05) with
+`make_minimal_prompt` instead of the old no-CoT `make_sft_prompt`. With a
+CoT-trained prior, the base-Gemma reference (itself instruction-tuned and
+CoT-capable) anchors the reasoning via the KL term.
+**Mitigations during RL:** raise the KL coefficient β — this is the
+primary lever, it pulls the policy harder toward the reasoning-capable
+reference. As a last resort, enable the optional `COT_BONUS` knob in
+notebook 07 § 0 (a small per-step reward for a well-formed `<thought>`
+block — structural shaping, not a learned reward model).
 
 ### 8.5 Seasonal bias
 **What it looks like:** Eval KPI on summer weeks improves; winter / shoulder

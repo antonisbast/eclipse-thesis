@@ -118,9 +118,9 @@ eclipse-thesis/
 **Done:**
 - `notebooks/01_env_setup.ipynb` — env factory, RBC/no-op/random baselines, SAC training
   loop, KPI evaluation against the CityLearn 2022 challenge metrics.
-- `src/env.py` — `make_env()` with `obs_set` (`sac` / `llm`) and `reward_fn` (`merlin` /
-  `eco`) switches; custom rewards `MERLINReward`, `EcoPeakBatteryReward`;
-  `snapshot_state()` exposing 12 fields per building (9 real-time + 3 forecasts).
+- `src/env.py` — `make_env()` with an `obs_set` (`sac` / `llm`) switch; the
+  `MERLINReward` reward function; `snapshot_state()` exposing 12 fields per
+  building (9 real-time + 3 forecasts).
 - `src/eval.py` — `evaluate()`, `comparison_table()`, `generalisation_gap()`,
   `EvalResult` dataclass; both Phase-I `(C+G)/2` and Combined `(C+G+D)/3` scores.
 

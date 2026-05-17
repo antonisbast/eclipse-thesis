@@ -67,7 +67,6 @@ def run_policy(
     policy_fn: Callable,
     start: int,
     length: int,
-    reward_fn: str = "merlin",
     obs_set: str = "llm",
     env_factory: Callable | None = None,
 ) -> tuple[pd.DataFrame, CityLearnEnv, list[dict]]:
@@ -76,11 +75,11 @@ def run_policy(
     `policy_fn(snap, t)` may return either `list[float]` (simple policies) or
     `(actions, raw, fallback)` (LLM policies). The latter is logged in `raw_log`.
 
-    `env_factory(start, end, obs_set, reward_fn)` overrides `make_env` — useful
+    `env_factory(start, end, obs_set)` overrides `make_env` — useful
     for the Colab variant that downloads the schema by name.
     """
     factory = env_factory or _default_env_factory
-    env = factory(start=start, end=start + length - 1, obs_set=obs_set, reward_fn=reward_fn)
+    env = factory(start=start, end=start + length - 1, obs_set=obs_set)
     env.reset()
 
     rows: list[dict] = []
@@ -122,7 +121,6 @@ def run_policy_dual_agent(
     agent_b_bldgs: list[int],
     start: int,
     length: int,
-    reward_fn: str = "merlin",
     obs_set: str = "llm",
     summary_every: int = 24,
     env_factory: Callable | None = None,
@@ -148,7 +146,7 @@ def run_policy_dual_agent(
     n_total = n_a + n_b
     all_bldgs = agent_a_bldgs + agent_b_bldgs
 
-    env = factory(start=start, end=start + length - 1, obs_set=obs_set, reward_fn=reward_fn)
+    env = factory(start=start, end=start + length - 1, obs_set=obs_set)
     env.reset()
 
     rows: list[dict] = []
@@ -222,8 +220,8 @@ def run_policy_dual_agent(
     return {"df": df, "env": env, "raw_log_a": raw_log_a, "raw_log_b": raw_log_b}
 
 
-def _default_env_factory(start: int, end: int, obs_set: str, reward_fn: str) -> CityLearnEnv:
-    return make_env(start=start, end=end, obs_set=obs_set, reward_fn=reward_fn)
+def _default_env_factory(start: int, end: int, obs_set: str) -> CityLearnEnv:
+    return make_env(start=start, end=end, obs_set=obs_set)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

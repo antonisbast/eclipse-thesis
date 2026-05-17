@@ -36,10 +36,6 @@ env:
   heldout_buildings:  [3, 4, 5]
   unseen_buildings:   [6, 7, 8, 9, 10, 11]
 
-  # Reward function: 'merlin' (default, dataset-agnostic, used for distillation)
-  # or 'eco' (multi-objective with cost/carbon/peak normalisation).
-  reward_fn: merlin
-
 # --- SAC expert baseline (Phase 1) ---
 sac:
   episodes: 30                          # CityLearn agent.learn(episodes=N)

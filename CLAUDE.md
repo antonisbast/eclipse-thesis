@@ -63,7 +63,7 @@ eclipse-thesis/
 │   └── 05_sft_gemma_colab.ipynb     ← LoRA SFT on Gemma via Unsloth (Colab) [IN PROGRESS]
 ├── scripts/               ← full-scale training, run on COLAB or DGX SPARK (empty stubs)
 ├── src/                   ← reusable modules
-│   ├── env.py             ← env factory, reward functions, snapshot_state()
+│   ├── env.py             ← env factory, MERLINReward, snapshot_state()
 │   ├── eval.py            ← KPI evaluation: evaluate(), comparison_table(), generalisation_gap()
 │   ├── agent.py           ← prompt construction, render_state, parse_actions, reference policies
 │   ├── providers.py       ← APIProvider (remote) + LocalHFProvider (local HF) — same .step() interface

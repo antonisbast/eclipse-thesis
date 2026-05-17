@@ -67,10 +67,9 @@ The CityLearn dataset exposes oracle forecasts (+6h/+12h price, +6h solar) but w
 - Battery dynamics gotcha: charge and discharge are roughly symmetric in ΔSoC. There is **no asymmetric hardware cap** on discharge. `±0.2` ≈ ±15 pp/step; `±1.0` ≈ ±70 pp/step.
 
 ### Reward
-- **`MERLINReward`** (default): SoC-aware net-consumption reward (Nweye et al., 2024, *Applied Energy*).
+- **`MERLINReward`** (the single project reward): SoC-aware net-consumption reward (Nweye et al., 2024, *Applied Energy*).
   `reward_i = −(1 + sign(net_i)·SoC_i) · |net_i|` per building.
   Returns a **list of 6 per-building rewards**. The per-building sum is what we typically train against.
-- Alternative: `EcoPeakBatteryReward` (cost+carbon+peak with normalization). Not used in distillation.
 - All rewards are negative (costs); lower magnitude = better.
 
 ### KPIs (CityLearn 2.6 `evaluate_v2()`)
@@ -96,7 +95,7 @@ Ratios to a no-battery baseline (1.0 = no improvement, < 1.0 = better):
 - `06_eval_generalization.ipynb` — load LoRA → eval across (season × building-subset) grid → generalisation gap.
 
 ### `src/` layout (single source of truth)
-- `src/env.py` — `make_env`, `snapshot_state`, `MERLINReward`, `EcoPeakBatteryReward`, building-set constants, `OBSERVATIONS`.
+- `src/env.py` — `make_env`, `snapshot_state`, `MERLINReward`, building-set constants, `OBSERVATIONS`.
 - `src/agent.py` — buckets, `render_state`, `parse_actions`, **`ACTION_RE`**, **canonical CoT prompt** `make_minimal_prompt`, `make_policy_llm`, reference policies (`policy_noop`, `policy_random`, `policy_rbc`).
 - `src/providers.py` — `APIProvider` (Anthropic / OpenAI-compat), `LocalHFProvider` (HF causal LMs on GPU).
 - `src/rollout.py` — `run_policy` (single-agent), `run_policy_dual_agent` (**Phase 4 only**), summaries.
