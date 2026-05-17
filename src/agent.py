@@ -83,6 +83,17 @@ def solar_bucket(v: float | None) -> str:
     return "HIGH"
 
 
+# ── Calendar labels ──────────────────────────────────────────────────────────
+# Month and weekday are rendered as short names ("Aug", "Mon"), not integers —
+# a small model reads a name's seasonal/weekly meaning more reliably than a
+# bare number, and it keeps the header internally consistent (weekday was
+# already a name). CityLearn day_type is 1=Mon … 7=Sun, 8=holiday; the 8th
+# slot guards a holiday in any dataset so the lookup never raises.
+_MONTH_NAMES: list[str] = ["?", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_DAY_NAMES:   list[str] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "Hol"]
+
+
 # ── State renderer ────────────────────────────────────────────────────────────
 def render_state(snap: list[dict]) -> str:
     """Convert a snapshot (list of building dicts) into an LLM prompt string.
@@ -94,17 +105,23 @@ def render_state(snap: list[dict]) -> str:
         return "(empty snapshot)"
     d0   = snap[0]
     hour = int(d0.get("hour", 1)) - 1
-    day  = int(d0.get("day_type", 1)) - 1
-    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+    # CityLearn day_type is 1=Mon … 7=Sun (8=holiday); index defensively so an
+    # out-of-range value never raises (this dataset only uses 1–7).
+    dt          = int(d0.get("day_type", 1))
+    day_label   = _DAY_NAMES[dt - 1] if 1 <= dt <= len(_DAY_NAMES) else "?"
+    mn          = int(d0.get("month", 0))
+    month_label = _MONTH_NAMES[mn] if 1 <= mn <= 12 else "?"
 
     prc = d0.get("electricity_pricing", None)
     crb = d0.get("carbon_intensity", None)
 
-    # price/carbon are shown as the bucket label only — the raw value is the
-    # continuous number the discretisation deliberately abstracts away, and
-    # showing it would invite the SLM to reason about it. See nb 01.5 § 7.
+    # month/weekday are shown as short names — the SLM reads seasonality from a
+    # name more reliably than from an integer. price/carbon are shown as the
+    # bucket label only: the raw value is the continuous number the
+    # discretisation deliberately abstracts away. See nb 01.5 § 7.
     header = (
-        f"Month {d0.get('month', '?')}, {day_names[day]} {hour:02d}:00  |  "
+        f"{month_label}, {day_label} {hour:02d}:00  |  "
         f"price={price_bucket(prc)}  |  carbon={carbon_bucket(crb)}"
     )
 
@@ -180,7 +197,7 @@ CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISC
 - Time: month, weekday, hour. No forecasts.
 
 [Physics]
-A building's grid draw is its load, minus its solar, plus any charging, minus any discharging. A negative result means the building exports to the grid for almost no reward. The {n_buildings} buildings share one meter, so the district's draw is the sum across them. Battery charge stays between 0% and 100%.
+A building meets its load from its own solar first and draws the rest from the grid. Charging a battery adds to that grid draw, while discharging it covers part of the load and lowers the draw. If solar and discharging together produce more than the load needs, the surplus is exported to the grid for almost no reward. The {n_buildings} buildings share one meter, so the district's draw is the sum across them. Battery charge stays between 0% and 100%.
 
 [Hints]
 - To keep cost down: discharge when grid electricity is expensive; charge when it is cheap or when solar can cover it.

@@ -170,7 +170,7 @@ CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISC
 - Time: month, weekday, hour. No forecasts.
 
 [Physics]
-A building's grid draw is its load, minus its solar, plus any charging, minus any discharging. A negative result means the building exports to the grid for almost no reward. The {n_buildings} buildings share one meter, so the district's draw is the sum across them. Battery charge stays between 0% and 100%.
+A building meets its load from its own solar first and draws the rest from the grid. Charging a battery adds to that grid draw, while discharging it covers part of the load and lowers the draw. If solar and discharging together produce more than the load needs, the surplus is exported to the grid for almost no reward. The {n_buildings} buildings share one meter, so the district's draw is the sum across them. Battery charge stays between 0% and 100%.
 
 [Hints]
 - To keep cost down: discharge when grid electricity is expensive; charge when it is cheap or when solar can cover it.
