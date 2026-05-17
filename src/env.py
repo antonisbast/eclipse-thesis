@@ -25,38 +25,20 @@ SCHEMA_FILE   = DATASET_ROOT / "schema.json"
 SEED: int = 42
 
 # ── Buildings ─────────────────────────────────────────────────────────────
-# Phases 1–3 train a SINGLE group-centralized agent over 3 buildings (one SLM
-# call per step, not two). Phase 4 splits the canonical 6-building district
-# across two agents (α=TRAINING_BUILDINGS, β=HELDOUT_BUILDINGS) for the
-# partial-observability + no-comms multi-agent experiment.
-#
-#   TRAINING_BUILDINGS — single-agent training/eval through Phase 3
-#   HELDOUT_BUILDINGS  — in-distribution generalization test (unseen buildings,
-#                        same dataset) AND Phase 4 agent β's slice
-#   BUILDINGS          — full district (Phase 4 deployment, dual-agent rollout)
-#   UNSEEN_BUILDINGS   — out-of-distribution generalization test (different
-#                        buildings from the same 2022 dataset)
 TRAINING_BUILDINGS: list[int] = [0, 1, 2]
 HELDOUT_BUILDINGS:  list[int] = [3, 4, 5]
 BUILDINGS:          list[int] = [0, 1, 2, 3, 4, 5]
-UNSEEN_BUILDINGS:   list[int] = [6, 7, 8, 9, 10, 11]
+UNSEEN_BUILDINGS:   list[int] = [6, 7, 8, 9, 10, 11,12,13,14,15,16,17]
 
 # ── Episode bounds ────────────────────────────────────────────────────────
 SIM_START: int = 0
 SIM_END:   int = 8759   # full year (8 760 hourly steps, indices 0–8759)
 
 # ── Observation sets ──────────────────────────────────────────────────────
-# NOTE: CityLearn exposes oracle short-horizon forecasts (price/solar +6 h, +12 h)
-# in the raw dataset. We deliberately DO NOT use them — they are perfect look-ahead
-# values from the simulation tape, not signals an agent could realistically obtain
-# in deployment. Including them would let the policy "cheat" against the test
-# distribution and inflate KPIs. The agent must reason about future conditions
-# from real-time state alone (time of day, calendar, current price/solar trend).
 #
 # Canonical 9 real-time variables — used by SAC (vector input) and the LLM
 # (which actually reads state via snapshot_state(), but the env still needs an
-# active_observations list to construct the obs vector). Forecast fields are
-# deliberately excluded; see the note above.
+# active_observations list to construct the obs vector).
 OBSERVATIONS: list[str] = [
     "month", "hour", "day_type",
     "electrical_storage_soc",
@@ -67,8 +49,6 @@ OBSERVATIONS: list[str] = [
     "carbon_intensity",
 ]
 
-# Legacy aliases — older notebook code referenced obs_set="sac" / "llm".
-# Both resolve to the same list now.
 OBSERVATIONS_SAC: list[str] = OBSERVATIONS
 OBSERVATIONS_LLM: list[str] = OBSERVATIONS
 
@@ -84,7 +64,7 @@ class MERLINReward(RewardFunction):
         C = net_electricity_consumption · electricity_pricing   (cost)
         G = net_electricity_consumption · carbon_intensity      (carbon emissions)
 
-    Grid-searched optimal parameters (Table 3): w1=1, w2=0, e1=1, e2=1.
+    Grid-searched optimal parameters : w1=1, w2=0, e1=1, e2=1.
 
     Reference: Nweye et al. (2024). Applied Energy, 358, 121958.
     https://doi.org/10.1016/j.apenergy.2023.121958
@@ -183,9 +163,6 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
     and net_electricity_consumption report stale (next-step initialisation)
     values. Always safe to call right after env.reset() or env.step().
 
-    NOTE: We deliberately exclude the oracle price/solar forecast fields that
-    CityLearn exposes — see the comment on OBSERVATIONS_SAC. The agent must
-    plan from real-time state only.
     """
     out = []
 
@@ -194,21 +171,7 @@ def snapshot_state(env: CityLearnEnv) -> list[dict]:
         return arr[max(0, min(idx, len(arr) - 1))]
 
     for b in env.buildings:
-        # env.time_step can sit one past the end after termination
-        # (CityLearn 2.6 behaviour). Some arrays are populated only up to
-        # t-1 (electrical_storage.soc, net_electricity_consumption — see
-        # the SoC obs-vector bug in docs/CITYLEARN_INSIGHTS.md), so we
-        # read those with index t-1 and clamp per-array via _at().
         t = env.time_step
-
-        # solar_generation: the raw tape is a W/kW capacity factor. Dividing by
-        # 1000 expresses it as the capacity factor — generation as a fraction
-        # of nameplate (standard-test-condition) output, in [0, ~1]. This is a
-        # calibration-free scale: it needs no per-building data, so the
-        # solar_bucket thresholds are absolute numbers that apply to any
-        # building or dataset, exactly like the absolute price thresholds.
-        # Per-building panel orientation still shifts the distribution — a real
-        # physical difference, not noise. See notebooks/01_5_bin_design.ipynb.
         solar_cf = float(_at(b.energy_simulation.solar_generation, t)) / 1000.0
 
         out.append({
