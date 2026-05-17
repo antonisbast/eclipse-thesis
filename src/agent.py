@@ -32,8 +32,8 @@ PRICE_PEAK_THRESHOLD: float = 0.30   # $/kWh — above this = PEAK price
                                      # gap → zero boundary noise.
 
 # Carbon intensity terciles (kgCO₂/kWh). The full-year tape is a bell curve over
-# 0.07–0.28; the old 0.12/0.25 edges left MID swallowing 84 % of steps. These
-# tercile edges give ~34/33/33 % LOW/MID/HIGH so every bin is informative.
+# 0.07–0.28 .
+# These tercile edges give ~34/33/33 % LOW/MID/HIGH so every bin is informative.
 CARBON_MID_THRESHOLD:  float = 0.14  # LOW | MID  edge
 CARBON_HIGH_THRESHOLD: float = 0.17  # MID | HIGH edge
 
@@ -86,9 +86,7 @@ def solar_bucket(v: float | None) -> str:
 # ── Calendar labels ──────────────────────────────────────────────────────────
 # Month and weekday are rendered as short names ("Aug", "Mon"), not integers —
 # a small model reads a name's seasonal/weekly meaning more reliably than a
-# bare number, and it keeps the header internally consistent (weekday was
-# already a name). CityLearn day_type is 1=Mon … 7=Sun, 8=holiday; the 8th
-# slot guards a holiday in any dataset so the lookup never raises.
+# bare number. CityLearn day_type is 1=Mon … 7=Sun, 8=holiday.
 _MONTH_NAMES: list[str] = ["?", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 _DAY_NAMES:   list[str] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "Hol"]
@@ -119,14 +117,12 @@ def render_state(snap: list[dict]) -> str:
     # month/weekday are shown as short names — the SLM reads seasonality from a
     # name more reliably than from an integer. price/carbon are shown as the
     # bucket label only: the raw value is the continuous number the
-    # discretisation deliberately abstracts away. See nb 01.5 § 7.
+    # discretisation deliberately abstracts away.
     header = (
         f"{month_label}, {day_label} {hour:02d}:00  |  "
         f"price={price_bucket(prc)}  |  carbon={carbon_bucket(crb)}"
     )
 
-    # Forecast fields are intentionally omitted — see note in src/env.py.
-    # The agent must anticipate future price/solar from real-time state alone.
     lines = [header, "Buildings:"]
     for i, d in enumerate(snap):
         soc  = d.get("electrical_storage_soc", 0.0)
@@ -197,7 +193,11 @@ CHARGE_100, CHARGE_80, CHARGE_60, CHARGE_40, CHARGE_20, IDLE, DISCHARGE_20, DISC
 - Time: month, weekday, hour. No forecasts.
 
 [Physics]
-A building meets its load from its own solar first and draws the rest from the grid. Charging a battery adds to that grid draw, while discharging it covers part of the load and lowers the draw. If solar and discharging together produce more than the load needs, the surplus is exported to the grid for almost no reward. The {n_buildings} buildings share one meter, so the district's draw is the sum across them. Battery charge stays between 0% and 100%.
+- A building meets its load from its own solar first and draws the rest from the grid. 
+- Charging a battery adds to that grid draw, while discharging it covers part of the load and lowers the draw. 
+- If solar and discharging together produce more than the load needs, the surplus is exported to the grid for almost no reward. 
+- The {n_buildings} buildings share one meter, so the district's draw is the sum across them. 
+- Battery charge stays between 0% and 100%.
 
 [Hints]
 - To keep cost down: discharge when grid electricity is expensive; charge when it is cheap or when solar can cover it.
