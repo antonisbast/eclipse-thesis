@@ -21,6 +21,63 @@
 
 ## Log
 
+### 2026-05-17 — MERLINReward now price-weighted (true paper formula) [LOCAL]
+- **`MERLINReward.calculate` (`src/env.py`) — cost term now includes the tariff.**
+  Previously the cost signal was raw `|net_electricity_consumption|` (kWh); the
+  paper's `C` is the monetary cost `net · electricity_pricing`. Changed
+  `signal` to `w1·|net·price|^e1 + w2·|net·carbon_intensity|^e2`, matching
+  Nweye et al. (2024). `electricity_pricing` is already an active observation
+  (`OBSERVATIONS` in `env.py`), so it reaches the reward dict. SoC multiplier
+  still keyed on `sign(net)` (robust if a tariff is ever 0).
+- **Consequence — reward scale dropped ~0.2–0.5×** (price is ~0.2–0.54 EUR/kWh).
+  Any SAC model / distill dataset generated under the old `merlin` reward should
+  be regenerated before further training; GRPO is scale-invariant so unaffected.
+- **Supervision note for nb 01.5:** the 01.5 entry below states the MERLIN
+  teacher "weights neither carbon nor price" — that is now half stale: at
+  `w1=1, w2=0` the **price** bucket *does* get BC supervision (cost = net·price);
+  carbon still does not (`w2=0`).
+
+### 2026-05-17 — nb 01.5 review fixes + month-as-text in render_state [LOCAL]
+- **Review of `notebooks/01_5_bin_design.ipynb`** (bins / actions / state) found
+  the bin thresholds and `action_to_token` math correct, but flagged one real
+  error and minor issues. Fixes:
+- **§ 3 carbon — wrong reward cited (the real error).** The decision text
+  justified the carbon bin with "the reward weights cost and carbon 0.4/0.4" —
+  those are `EcoPeakBatteryReward`'s weights, but the SAC teacher / distillation
+  use `MERLINReward` at `w1=1, w2=0`, which optimises net consumption only and
+  weights neither carbon nor price. Rewrote § 3 with the correct reward and an
+  honest **supervision caveat**: under a MERLIN teacher the carbon (and price)
+  buckets get little direct BC supervision — they earn their slot via zero-shot
+  prompting, a Phase-3 RL reward, and the carbon-emissions KPI, not via the
+  distillation labels. Solar IS genuinely supervised (a net-minimiser responds
+  to solar surplus).
+- **§ 2 price — PEAK-window inconsistency.** Text said PEAK = "16:00–19:00"
+  (4 h) but also 20.8 %; 20.8 % of the year is ~5 h/day. Reworded to "~5 hours a
+  day, 20.8 %" and dropped the over-specified window.
+- **§ 5 action bins — reframed from "data-quantile, deferred" to "fixed uniform
+  20 %, final"** (per user: fixed bins, not data-driven). The token name encodes
+  the magnitude (`CHARGE_40` = 0.40), so uniform 0.20-wide steps are the only
+  self-consistent layout; data-quantile edges would break the name↔value
+  correspondence. Added the principle **action bin ≠ state bin**: a state bin
+  must be non-degenerate, an action bin must be faithful to the teacher (empty
+  buckets are fine). IDLE-dominance stays a dataset problem (`rebalance_rows`),
+  not a binning one. § 5 code cell now does a token round-trip assertion +
+  fixed-bin token mix instead of the provisional-quantile preview.
+- **`render_state` (`src/agent.py`) — month rendered as a short name.** Header
+  `Month 8, Mon 12:00` → `Aug, Mon 12:00` — consistent with the weekday (already
+  a name) and surfaces seasonality for the SLM. Added `_MONTH_NAMES` /
+  `_DAY_NAMES` module constants.
+- **`render_state` — hardened the weekday lookup.** `day_names[day_type-1]`
+  would `IndexError` on a holiday (`day_type=8`); now indexed defensively
+  (`_DAY_NAMES` has a `Hol` slot, out-of-range → `?`). This dataset only uses
+  `day_type` 1–7, so no prior crash — robustness only.
+- **`sandbox/analyze_distill_dataset.py`** — `MONTH_RE` updated to parse the
+  short month name; staleness guard now also catches a pre-month-change JSONL.
+- **Cleanup:** removed unused `load_all` from nb 01.5 § 1.
+- **Re-run scope:** nb 04 must be re-run (the rendered-state header changed
+  again — month name; no SAC retrain needed). The existing JSONL is stale.
+  nb 05/06 follow as already noted. No phase change.
+
 ### 2026-05-16 — State discretisation & representation design [LOCAL]
 - **New notebook `notebooks/01_5_bin_design.ipynb`** — a design document, framed
   as a fresh derivation (not a corrections pass): it analyses the deterministic

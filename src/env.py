@@ -87,11 +87,12 @@ MAX_NET_LOAD: float = 10.0   # kWh/step  — per-building; observed max 8.51, +1
 # ── Reward functions ──────────────────────────────────────────────────────
 
 class MERLINReward(RewardFunction):
-    """SoC-aware net-consumption reward (Nweye et al., 2024).
+    """SoC-aware price & carbon reward (Nweye et al., 2024).
 
-    reward = −(1 + sign(net) · SoC) · |net_consumption|
+    reward = −(1 + sign(net) · SoC) · (w1·|C|^e1 + w2·|G|^e2)
+        C = net_electricity_consumption · electricity_pricing   (cost)
+        G = net_electricity_consumption · carbon_intensity      (carbon emissions)
 
-    Uses raw kWh values — no dataset-specific normalisation required.
     Grid-searched optimal parameters (Table 3): w1=1, w2=0, e1=1, e2=1.
 
     Reference: Nweye et al. (2024). Applied Energy, 358, 121958.
@@ -107,9 +108,10 @@ class MERLINReward(RewardFunction):
         rewards = []
         for o in observations:
             net    = o.get("net_electricity_consumption", 0.0)
-            carbon = o.get("carbon_intensity", 0.0) * abs(net)
+            cost   = net * o.get("electricity_pricing", 0.0)
+            carbon = net * o.get("carbon_intensity", 0.0)
             soc    = o.get("electrical_storage_soc", 0.0)
-            signal = self.w1 * (abs(net) ** self.e1) + self.w2 * (abs(carbon) ** self.e2)
+            signal = self.w1 * (abs(cost) ** self.e1) + self.w2 * (abs(carbon) ** self.e2)
             rewards.append(float(-(1.0 + np.sign(net) * soc) * signal))
         return [float(sum(rewards))] if self.central_agent else rewards
 
