@@ -232,6 +232,67 @@ def filter_uninformative_rows(
     return kept
 
 
+# ── Per-cell supervision masking (physical no-ops) ────────────────────────
+
+_PROMPT_SOC_RE = re.compile(r"SoC=\s*([\d.]+)%")
+
+
+def supervision_mask(row: dict) -> list[bool]:
+    """Per-building supervision flags for one distillation row.
+
+    Returns one bool per building: ``True`` = supervise this building's
+    action token in the SFT loss, ``False`` = mask it (loss label -100).
+
+    A cell is masked when the SAC teacher's continuous action is a *physical
+    no-op* — a discharge from a (near-)empty battery or a charge into a
+    (near-)full one. CityLearn clips those to zero, so the realised action is
+    nothing, and the row's ``response`` already shows IDLE there (the
+    `action_to_token` relabel). That IDLE is an artifact of clipping, NOT a
+    teacher decision: supervising it teaches "battery near empty → IDLE" and
+    the student then never charges out of a cold start (the dominant failure
+    mode of the first SAC-distilled SFT run). Masking removes the artifact
+    label without fabricating anything — the student is simply given no
+    lesson where SAC had no opinion.
+
+    A masked cell is determined exactly the way `action_to_token`'s relabel
+    is: the SoC-aware token differs from the raw token. SoC is read from the
+    row ``prompt`` text (percent). If it cannot be parsed, or its length
+    mismatches ``actions_float``, every building is supervised (fail-safe —
+    never silently drop signal).
+    """
+    socs_pct = _PROMPT_SOC_RE.findall(row.get("prompt", ""))
+    acts     = row.get("actions_float", [])
+    if not acts or len(socs_pct) != len(acts):
+        return [True] * len(acts)
+    mask: list[bool] = []
+    for s_pct, a in zip(socs_pct, acts):
+        soc = float(s_pct) / 100.0
+        a   = float(a)
+        is_noop = action_to_token(a) != action_to_token(a, soc=soc)
+        mask.append(not is_noop)
+    return mask
+
+
+def attach_supervision_masks(rows: list[dict]) -> list[dict]:
+    """Attach a per-building ``supervise`` flag list to every row and drop
+    rows where NO building is supervised.
+
+    Run AFTER `filter_uninformative_rows`. Each returned row gains a
+    ``supervise`` key (``list[bool]``, see `supervision_mask`). The handful
+    of rows where every building's action is a physical no-op are dropped —
+    all their loss labels would be -100, so they contribute zero gradient
+    and only waste a forward pass.
+
+    Returns new row dicts; the input rows are not mutated.
+    """
+    kept: list[dict] = []
+    for row in rows:
+        m = supervision_mask(row)
+        if any(m):
+            kept.append({**row, "supervise": m})
+    return kept
+
+
 # ── Class rebalancing (imbalanced distillation dataset) ───────────────────
 
 _RESPONSE_TOKEN_RE = re.compile(

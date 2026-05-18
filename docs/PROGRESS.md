@@ -21,6 +21,37 @@
 
 ## Log
 
+### 2026-05-18 — nb 02 reconstructed as a seasonal-panel evaluation [LOCAL]
+- **Root cause investigated:** a single-week nb 02 run gave "very bad" KPIs.
+  It was a window change (`WEEK_START` 3624→5624) into a solar-rich, net-export
+  window where the cost KPI `C` (`district_cost_ratio_to_baseline`) degenerates:
+  the no-control baseline cost collapses toward zero, so the ratio explodes /
+  flips sign (Random C = −0.21, RBC C = 3.0). `G`/`R`/`1L` stay well-conditioned
+  (their baselines never cross zero) — that asymmetry confirmed the diagnosis.
+  Raw reward was actually fine.
+- **`src/rollout.py`: added `run_sac`** — inference-only rollout of a trained
+  CityLearn SAC agent, same DataFrame schema as `run_policy`. Uses
+  `get_post_exploration_prediction` (not `predict`): an agent loaded from disk
+  carries a stale `time_step` that overflows `predict`'s per-episode buffer.
+- **`02_llm_policy.ipynb` rebuilt — no single-week run at all.** Every policy
+  (no-op / random / RBC / SAC / 4 LLM providers) is scored on a stratified
+  **4-window seasonal panel** (W1 Sep / W2 Dec / W3 Mar / W4 Jun, 168 steps
+  each) via a new `panel_rollout` engine. All 6 Challenge KPIs per window +
+  aggregate over valid-C windows, degeneracy flagging, capture-vs-SAC,
+  panel-aware diagnostics, and a SAC full-year calibration.
+- **Calibration:** SAC panel-mean C 0.747 vs full-year C 0.746 (3-bldg) —
+  proxy error 0.0012. The valid-C panel windows faithfully proxy the year, so
+  the LLM can be iterated cheaply (~8% of full-year compute) and the full year
+  run only once.
+- **Finding (DeepSeek zero-shot vs SAC):** ties SAC on cost (`C` ≈ 100%) but
+  only ≈30% of SAC on Phase I — carbon-blind (`G` ≈ 1.05–1.11, worse than
+  no-control) and "charge-and-park" (fills batteries to ~85% then idles), which
+  also makes it lose to no-op on the MERLIN reward. Gap to SAC is localised to
+  carbon-aware timing + battery cycling — exactly what the Phase 3 SAC→SLM
+  distillation targets. Go/no-go for SLM development: positive.
+- nb 02 outputs were cleared by the rebuild — re-run §§ 0–16 (each provider is
+  ~672 API calls, ~16–20 min).
+
 ### 2026-05-17 — Removed the secondary reward function — MERLIN only [LOCAL]
 - **Deleted `EcoPeakBatteryReward`** (normalised cost+carbon+peak multi-objective
   reward) from `src/env.py`, the nb 01 inline copy, and the nb 03 import.

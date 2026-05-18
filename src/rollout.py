@@ -4,6 +4,8 @@
                           Phase 3. The policy sees all buildings of the env
                           (TRAINING_BUILDINGS=[0,1,2] for SLM training/eval;
                           BUILDINGS=[0..5] when used on the full district).
+`run_sac`               — inference-only rollout of a trained CityLearn SAC
+                          agent; same output schema as `run_policy`.
 `run_policy_dual_agent` — PHASE 4 ONLY. Dual-agent rollout with partial
                           observability: two policy calls per step (α + β),
                           actions merged in global building-index order.
@@ -22,6 +24,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 from citylearn.citylearn import CityLearnEnv
+from citylearn.agents.sac import SAC
 
 from src.agent import render_state
 from src.env import make_env, snapshot_state
@@ -111,6 +114,68 @@ def run_policy(
     print(f"[{name}] {t} steps in {time.time()-t0:.1f}s | "
           f"reward={df['reward_sum'].sum():.4f}{fb_msg}")
     return df, env, raw_log
+
+
+def run_sac(
+    name: str,
+    agent: SAC,
+    start: int,
+    length: int,
+    obs_set: str = "sac",
+    env_factory: Callable | None = None,
+) -> tuple[pd.DataFrame, CityLearnEnv]:
+    """Inference-only rollout of a trained CityLearn SAC agent.
+
+    Mirrors `run_policy`'s DataFrame schema so `summarize_district` and the
+    KPI helpers work identically for SAC and LLM runs.
+
+    Uses `agent.get_post_exploration_prediction` rather than `agent.predict`:
+    a SAC agent loaded from disk carries a stale `time_step` (≈ episodes ×
+    8760) that overflows the per-episode action buffer `predict` writes to.
+    The low-level call is a pure policy forward pass with no buffer writes.
+
+    Args:
+        name:        Label stored in the `policy` column.
+        agent:       A trained `citylearn.agents.sac.SAC` instance.
+        start:       Simulation start timestep.
+        length:      Number of steps to roll out.
+        obs_set:     Observation set passed to the env factory.
+        env_factory: `factory(start, end, obs_set)` override for `make_env`
+                     — e.g. to pin a specific building subset.
+
+    Returns:
+        Tuple of (per-step DataFrame, env after the completed episode).
+    """
+    factory = env_factory or _default_env_factory
+    env = factory(start=start, end=start + length - 1, obs_set=obs_set)
+    obs, _ = env.reset()
+
+    rows: list[dict] = []
+    done, t, t0 = False, 0, time.time()
+
+    while not done:
+        snap    = snapshot_state(env)
+        actions = agent.get_post_exploration_prediction(obs, deterministic=True)
+        acts    = [float(a[0]) for a in actions]
+
+        obs, reward, terminated, truncated, _ = env.step(actions)
+        done = bool(terminated or truncated)
+        post = snapshot_state(env)
+        n = len(acts)
+
+        rows.append({
+            "policy": name, "t": t, "price": snap[0]["electricity_pricing"],
+            "reward_sum": float(np.sum(reward)),
+            **{f"a{i}":   acts[i]                                     for i in range(n)},
+            **{f"r{i}":   float(reward[i])                            for i in range(n)},
+            **{f"soc{i}": post[i]["electrical_storage_soc"]           for i in range(n)},
+            **{f"net{i}": post[i]["net_electricity_consumption_last"] for i in range(n)},
+        })
+        t += 1
+
+    df = pd.DataFrame(rows)
+    print(f"[{name}] {t} steps in {time.time()-t0:.1f}s | reward={df['reward_sum'].sum():.4f}")
+    return df, env
 
 
 def run_policy_dual_agent(
