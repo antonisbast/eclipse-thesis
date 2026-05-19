@@ -10,18 +10,92 @@
 
 **Working on (IN PROGRESS, not completed):**
 - `04_sac_distill_dataset.ipynb` — full-year SAC rollout dumped to `(state_text, action_token)` JSONL via `src/sft.py`
-- `05_sft_gemma_colab.ipynb` — LoRA SFT on Gemma in Colab via Unsloth, consuming the JSONL above
+- `05_sft_gemma_colab.ipynb` — SFTv13 trained + `06_eval_generalization.ipynb` evaluated (2026-05-19): SFT beats base Gemma and is stable on unseen buildings, but is a weak controller (≈ no-control in 2/4 windows, far from SAC). Validation gate NOT genuinely cleared.
 - `src/sft.py` — `action_to_token` (11-bucket discretisation), `dump_sac_trajectory_jsonl`, `make_sft_prompt`
 
 **Blockers:** None
 **Compute:** MacBook Air (local dev / nb 04 dataset gen), Google Colab Pro (SAC full-scale training, SFT in nb 05)
-**Next step:** Run distillation dataset generation end-to-end → run LoRA SFT on Colab → evaluate fine-tuned SLM in CityLearn against zero-shot SLM and SAC baselines (validation gate: ≥70 % of SAC).
+**Next step:** SAC teacher confirmed good (nb 04, 40 ep — see 2026-05-19 log); the distillation gap is representation / behaviour-cloning, not the teacher. Run `sandbox/distill_signal_diagnostic.py` → if the rendered state predicts the teacher action, treat v13 SFT as a warm-start and move to Phase 3 GRPO (nb 07); if not, enrich `render_state` and re-distil. The ≥70%-of-SAC gate is RL's job to clear.
 
 ---
 
 ## Log
 
-### 2026-05-18 — nb 02 reconstructed as a seasonal-panel evaluation [LOCAL]
+### 2026-05-19 — SFTv13 run reviewed: trains clean, weak controller [LOCAL]
+- **nb 05 SFTv13 — training completed on Colab.** Gemma-4 E4B, LoRA r16/α32,
+  36.7M params (0.46%), 8,367 examples, **1,046 steps = 2 epochs**, 3h09m.
+  Train loss 1.09 (s25) → 0.031 (s50) → 0.012 (s100) → 0.0068 (s1025).
+  Adapter at `sft_out_v13/20260518_124126/lora_adapter`, copied to
+  `sft_adaptersV13/lora_adapter`. Data pipeline OK: 17,518 raw → 8,500 after
+  no-op-row filter → 8,367 after masking; 9,595 no-op cells masked from loss.
+- **Review findings (nb 05):**
+  - `EPOCHS=1` in the § 0 config is **dead code** — `SFTConfig` hardcodes
+    `num_train_epochs=2`. Loss confirms epoch 1 does ~all the work
+    (epoch 2: 0.0079 → 0.0068). 2nd epoch is ~95 min for nothing.
+  - **No eval split and no collapse gate** — both were added 2026-05-16 to
+    catch the v6 all-IDLE collapse; this rebuild dropped them. Training-loss
+    only; the instrument that caught the last collapse is gone.
+  - nb 05 §10+ eval cells never ran — "completed" = training only.
+  - Loss number is boilerplate-dominated (supervised span still includes
+    `<action building=N>`/`</action>`); not a clean action-prediction metric.
+- **nb 06 SFTv13 generalisation eval — completed on Colab** (unseen buildings
+  [6,7,8], 4 seasonal windows). `eval_runs/v13_base_vs_sft_20260518_215650`.
+  - **SFT clearly beats base Gemma:** carbon `G` lower in all 4 windows
+    (W1 .89 vs 1.31, W2 1.05 vs 1.11, W3 .96 vs 1.78, W4 1.23 vs 2.07);
+    Phase I std collapses 1.12 (base) → 0.37 (SFT) — stable on unseen
+    buildings. Uses full action vocab, 0 parse fallbacks, no v6 IDLE collapse.
+  - **But SFT is a weak controller:** Phase I mean SAC 0.40 vs SFT 0.77;
+    SFT ≈ no-control in W2 (.983) and W3 (.987, 77% IDLE). Carbon `G`>1
+    (worse than no-op) in W2/W3 W4; ramping `R`>1 every window.
+  - **Validation gate NOT genuinely passed.** The "79.3% of SAC" headline is
+    computed on W2 only — the single valid-C window — where SAC itself beats
+    no-control by just 2.2%, so the capture ratio divides two ~0 numbers. On
+    W4 (SAC has a real margin) SFT captures only ~17%.
+- **nb 06 bugs flagged (not yet fixed):** §8.1 prints "small error confirms
+  the panel proxies the year" but the printed proxy error is 0.308 (SAC
+  full-year C 0.66 vs panel-mean 0.97) — hardcoded sentence contradicts its
+  own number. `Δ Phase I` headline + capture metric both run on Phase I,
+  whose `C` term is degenerate in 3/4 windows — `G` is the only honest
+  cross-window metric.
+- **Prompt consistency verified OK:** the SFT model in nb 06 IS evaluated on
+  `make_sft_prompt` (no-CoT) — the exact training prompt. JSONL prompt field,
+  nb 05 training, and `LocalHFProvider` inference all render
+  `make_sft_prompt + "\n\n" + "STATE:\n" + render_state(...)` identically.
+  The CoT prompt is used only for the *base* model (correct — base never saw
+  the SFT prompt). The weak KPIs are not a prompt-mismatch artifact.
+- **SAC teacher — retraining item from 2026-05-15 CLOSED.** nb 04 now trains
+  SAC for **40 episodes** (290 min) and it beats RBC on every KPI on the full
+  6-building district, full year: Phase I 0.814 vs RBC 0.942 (C 0.80, G 0.83,
+  R 0.78, 1L 0.95), ZNE 1.33 / 0.78 — SOTA-comparable (MERLIN protocol). The
+  teacher is **not** the bottleneck. SAC's uneven W2/W3 numbers in nb 06 are
+  transfer degradation onto unseen buildings [6,7,8] plus seasonal-window
+  variance, not undertraining.
+- **Revised diagnosis — the gap is representation / behaviour-cloning, not
+  teacher quality.** Two diagnostics added 2026-05-19:
+  - `sandbox/distill_signal_diagnostic.py` — fits a decision tree (+ random
+    forest) on `(rendered-state -> action-token)` from the JSONL. **Run
+    2026-05-19:** signal IS in the rendered state — depth-8 tree 50.8% vs
+    23.5% majority baseline (11-class action token), 80.4% vs 45.2%
+    (coarse charge/idle/discharge), RF 59.3%. Feature importance load .30 /
+    SoC .17 / last_net .17 / hour .12 / solar .08 — but **price .02, carbon
+    .02**: the bucketed price/carbon labels carry almost no teacher signal
+    (the MERLIN w1=1,w2=0 teacher is carbon-blind). Conclusion: the SLM *can*
+    learn this map — the SFT gap is the behaviour-cloning method, not the
+    representation. Carbon-aware timing must come from RL, not SFT.
+  - nb 05 § 6.5 — per-action-token loss + action-token accuracy + predicted-
+    token distribution (collapse check), all on the training set (no held-out
+    split). Sees past the boilerplate-dominated aggregate loss.
+- **nb 05 fixes (2026-05-19):** `num_train_epochs` now reads the § 0 `EPOCHS`
+  knob (was hardcoded 2 while the config said 1); set `EPOCHS=1` — epoch 2
+  moved loss only 0.0079→0.0068. The § 7 provider cell now re-applies the
+  gemma-4 chat template + the `apply_chat_template` monkey-patch to the
+  cell-20-reloaded tokenizer; without them the post-training 1-week eval
+  (§ 10–11) crashed mid-rollout (stalled right after the SFT-SLM header).
+  nb 05 inference now mirrors nb 06's working setup.
+- v13 is an acceptable SFT *warm-start for Phase 3 GRPO* (nb 07), not a final
+  policy; do not report the validation gate as passed.
+
+### 2026-05-18 — nb 02 / 03 / 06 reconstructed as seasonal-panel evaluations [LOCAL]
 - **Root cause investigated:** a single-week nb 02 run gave "very bad" KPIs.
   It was a window change (`WEEK_START` 3624→5624) into a solar-rich, net-export
   window where the cost KPI `C` (`district_cost_ratio_to_baseline`) degenerates:
@@ -51,6 +125,22 @@
   distillation targets. Go/no-go for SLM development: positive.
 - nb 02 outputs were cleared by the rebuild — re-run §§ 0–16 (each provider is
   ~672 API calls, ~16–20 min).
+- **`03_slm_colab.ipynb` rebuilt (Colab)** — same 4-window panel for the local
+  SLM-as-policy. Colab install / clone / model-load cells kept verbatim; added
+  the panel engine, SAC expert (loaded from Drive), all-KPI tables,
+  capture-vs-SAC, calibration, panel-aware diagnostics and findings. The SLM
+  panel rollout is **resumable** — re-run after a Colab disconnect and it
+  continues from the last finished window.
+- **`06_eval_generalization.ipynb` rebuilt (Colab)** — its config grid is now
+  the 4 seasonal windows on UNSEEN buildings [6,7,8] (generalisation / RQ2).
+  Added the SAC expert as the distillation-teacher reference (`Δ Phase I
+  (SFT − SAC)`, capture-vs-SAC), regime/degeneracy flagging, calibration and
+  findings. Fixed a latent bug — `make_eval_env` passed `reward_fn="merlin"`
+  to `make_env`, which no longer accepts it (removed 2026-05-17); it now
+  builds the env via the auto-download schema. Grid is resumable config-by-config.
+- Both Colab notebooks load the SAC pickle from Drive
+  (`MyDrive/eclipse-thesis/agents/sac_*.pkl`, `USE_SAC` toggle). nb 03 / 06
+  outputs were cleared by the rebuild.
 
 ### 2026-05-17 — Removed the secondary reward function — MERLIN only [LOCAL]
 - **Deleted `EcoPeakBatteryReward`** (normalised cost+carbon+peak multi-objective
